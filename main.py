@@ -4,6 +4,8 @@ import numpy as np
 import gc
 import os
 import csv
+import argparse
+from pathlib import Path
 from tqdm import tqdm
 
 from team_assigner import TeamAssigner
@@ -818,11 +820,32 @@ def process_chunk(
 
 
 def main():
-    INPUT_VIDEO_PATH = "input_videos\match2.mp4"
-    OUTPUT_VIDEO_PATH = "output_videos/2.mp4"
+    parser = argparse.ArgumentParser(description="Football CV pipeline")
+    parser.add_argument(
+        "--input_video",
+        type=str,
+        default="input_videos/match2.mp4",
+        help="Path to the input video"
+    )
+    parser.add_argument(
+        "--output_video",
+        type=str,
+        default="output_videos/2.mp4",
+        help="Path to the output video"
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=75,
+        help="Number of frames per chunk"
+    )
 
-    CHUNK_SIZE = 75
-    OUTPUT_DIR = "output_videos"
+    args = parser.parse_args()
+
+    INPUT_VIDEO_PATH = args.input_video
+    OUTPUT_VIDEO_PATH = args.output_video
+    CHUNK_SIZE = args.chunk_size
+    OUTPUT_DIR = str(Path(OUTPUT_VIDEO_PATH).parent)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
