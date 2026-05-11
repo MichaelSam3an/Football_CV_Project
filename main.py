@@ -818,7 +818,7 @@ def process_chunk(
 
 
 def main():
-    INPUT_VIDEO_PATH = r"input_videos\match2.mp4"
+    INPUT_VIDEO_PATH = "input_videos\match2.mp4"
     OUTPUT_VIDEO_PATH = "output_videos/2.mp4"
 
     CHUNK_SIZE = 75
