@@ -1,0 +1,762 @@
+from ultralytics import YOLO
+import supervision as sv
+import pickle
+import os
+import numpy as np
+import pandas as pd
+import cv2
+import sys
+from pathlib import Path
+
+sys.path.append("../")
+
+from utils import get_center_of_bbox, get_bbox_width, get_foot_position
+
+
+class Tracker:
+    def __init__(
+        self,
+        model_path,
+        ball_model_path="models/yolov8s_ball_best.pt",
+        use_new_ball_model=True
+    ):
+        self.model_path = model_path
+        self.ball_model_path = ball_model_path
+
+        # Main YOLO model: players + referees
+        self.model = YOLO(model_path)
+
+        # Optional custom YOLO model: ball only
+        self.use_new_ball_model = use_new_ball_model
+        self.ball_model = None
+
+        if self.use_new_ball_model:
+            if not Path(ball_model_path).exists():
+                raise FileNotFoundError(
+                    f"Ball model not found: {ball_model_path}\n"
+                    f"Put yolov8s_ball_best.pt inside the models folder."
+                )
+
+            self.ball_model = YOLO(ball_model_path)
+
+        self.tracker = sv.ByteTrack()
+
+        # Detection settings
+        self.main_conf = 0.08
+        self.main_imgsz = 960
+
+        self.ball_conf = 0.18
+        self.ball_imgsz = 960
+
+        # Ball filtering settings
+        self.max_ball_interpolation_gap = 8
+        self.max_ball_box_width_ratio = 0.12
+        self.max_ball_box_height_ratio = 0.12
+        self.max_ball_jump_ratio = 0.16
+
+        # Play-area margins
+        # These are intentionally not too strict because the ball may go near touchlines.
+        self.play_area_left_ratio = 0.01
+        self.play_area_right_ratio = 0.99
+        self.play_area_top_ratio = 0.03
+        self.play_area_bottom_ratio = 0.98
+
+        # Drawing settings
+        self.draw_ball_label = True
+
+    def add_position_to_tracks(self, tracks):
+        for object_name, object_tracks in tracks.items():
+            if object_name not in ["players", "referees", "ball"]:
+                continue
+
+            for frame_num, track in enumerate(object_tracks):
+                for track_id, track_info in track.items():
+                    bbox = track_info["bbox"]
+
+                    if object_name == "ball":
+                        position = get_center_of_bbox(bbox)
+                    else:
+                        position = get_foot_position(bbox)
+
+                    tracks[object_name][frame_num][track_id]["position"] = position
+
+    def interpolate_ball_positions(self, ball_positions, max_gap=None):
+        """
+        Interpolates only short missing gaps.
+
+        Long missing gaps stay empty. This avoids creating fake ball positions
+        when the ball disappears for a long time.
+        """
+
+        if max_gap is None:
+            max_gap = self.max_ball_interpolation_gap
+
+        clean_ball_positions = []
+
+        for frame_ball in ball_positions:
+            bbox = frame_ball.get(1, {}).get("bbox", None)
+
+            if bbox is None or len(bbox) != 4:
+                clean_ball_positions.append([np.nan, np.nan, np.nan, np.nan])
+            else:
+                clean_ball_positions.append(bbox)
+
+        df = pd.DataFrame(
+            clean_ball_positions,
+            columns=["x1", "y1", "x2", "y2"]
+        )
+
+        df = df.interpolate(
+            method="linear",
+            limit=max_gap,
+            limit_direction="both"
+        )
+
+        new_ball_positions = []
+
+        for row in df.to_numpy().tolist():
+            if any(pd.isna(value) for value in row):
+                new_ball_positions.append({})
+            else:
+                new_ball_positions.append({1: {"bbox": row}})
+
+        return new_ball_positions
+
+    def detect_frames(self, frames):
+        batch_size = 2
+        detections = []
+
+        for i in range(0, len(frames), batch_size):
+            detections_batch = self.model.predict(
+                frames[i:i + batch_size],
+                conf=self.main_conf,
+                device="cpu",
+                imgsz=self.main_imgsz,
+                verbose=False
+            )
+
+            detections += detections_batch
+
+        return detections
+
+    def detect_ball_frames(self, frames):
+        if not self.use_new_ball_model or self.ball_model is None:
+            return [None for _ in frames]
+
+        batch_size = 2
+        ball_detections = []
+
+        for i in range(0, len(frames), batch_size):
+            detections_batch = self.ball_model.predict(
+                frames[i:i + batch_size],
+                conf=self.ball_conf,
+                device="cpu",
+                imgsz=self.ball_imgsz,
+                verbose=False
+            )
+
+            ball_detections += detections_batch
+
+        return ball_detections
+
+    def is_reasonable_ball_size(self, bbox, frame_shape):
+        frame_height, frame_width = frame_shape[:2]
+
+        x1, y1, x2, y2 = bbox
+        bbox_width = x2 - x1
+        bbox_height = y2 - y1
+
+        if bbox_width <= 1 or bbox_height <= 1:
+            return False
+
+        if bbox_width > frame_width * self.max_ball_box_width_ratio:
+            return False
+
+        if bbox_height > frame_height * self.max_ball_box_height_ratio:
+            return False
+
+        return True
+
+    def is_inside_play_area(self, bbox, frame_shape):
+        frame_height, frame_width = frame_shape[:2]
+        x, y = get_center_of_bbox(bbox)
+
+        left_margin = frame_width * self.play_area_left_ratio
+        right_margin = frame_width * self.play_area_right_ratio
+        top_margin = frame_height * self.play_area_top_ratio
+        bottom_margin = frame_height * self.play_area_bottom_ratio
+
+        if x < left_margin or x > right_margin:
+            return False
+
+        if y < top_margin or y > bottom_margin:
+            return False
+
+        return True
+
+    def is_valid_ball_motion(self, current_bbox, previous_bbox, frame_shape):
+        """
+        Rejects impossible one-frame ball jumps.
+
+        This is intentionally not too strict because real football movement can
+        be fast. More advanced analytics filtering is done in main.py.
+        """
+
+        if previous_bbox is None:
+            return True
+
+        frame_height, frame_width = frame_shape[:2]
+        frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
+
+        current_center = get_center_of_bbox(current_bbox)
+        previous_center = get_center_of_bbox(previous_bbox)
+
+        dx = current_center[0] - previous_center[0]
+        dy = current_center[1] - previous_center[1]
+        distance = (dx ** 2 + dy ** 2) ** 0.5
+
+        max_allowed_jump = frame_diag * self.max_ball_jump_ratio
+
+        if distance > max_allowed_jump:
+            return False
+
+        return True
+
+    def get_ball_bbox_from_ball_model(self, detection, frame):
+        if detection is None or detection.boxes is None:
+            return None
+
+        best_bbox = None
+        best_score = 0
+
+        for box in detection.boxes:
+            score = float(box.conf[0])
+            bbox = box.xyxy[0].tolist()
+
+            if not self.is_reasonable_ball_size(bbox, frame.shape):
+                continue
+
+            if not self.is_inside_play_area(bbox, frame.shape):
+                continue
+
+            if score > best_score:
+                best_score = score
+                best_bbox = bbox
+
+        return best_bbox
+
+    def get_ball_bbox_from_normal_detection(self, detection, frame):
+        names = detection.names
+
+        best_bbox = None
+        best_score = 0
+
+        if detection.boxes is None:
+            return None
+
+        for box in detection.boxes:
+            cls_id = int(box.cls[0])
+            score = float(box.conf[0])
+
+            class_name = str(names.get(cls_id, "")).lower().strip()
+
+            if class_name != "ball":
+                continue
+
+            bbox = box.xyxy[0].tolist()
+
+            if not self.is_reasonable_ball_size(bbox, frame.shape):
+                continue
+
+            if not self.is_inside_play_area(bbox, frame.shape):
+                continue
+
+            if score > best_score:
+                best_score = score
+                best_bbox = bbox
+
+        return best_bbox
+
+    def get_previous_ball_bbox(self, tracks, frame_num, lookback=8):
+        start = max(0, frame_num - lookback)
+
+        for prev_frame_num in range(frame_num - 1, start - 1, -1):
+            previous_bbox = tracks["ball"][prev_frame_num].get(1, {}).get("bbox", None)
+
+            if previous_bbox is not None:
+                return previous_bbox
+
+        return None
+
+    def remove_duplicate_player_referee_boxes(
+        self,
+        detection_supervision,
+        cls_names_inv
+    ):
+        """
+        Optional cleanup:
+        if the same area is detected as both player and referee, keep referee.
+
+        This reduces cases where a referee is also tracked as a player and then
+        gets team-colored later.
+        """
+
+        if len(detection_supervision) == 0:
+            return detection_supervision
+
+        if "player" not in cls_names_inv or "referee" not in cls_names_inv:
+            return detection_supervision
+
+        player_id = cls_names_inv["player"]
+        referee_id = cls_names_inv["referee"]
+
+        boxes = detection_supervision.xyxy
+        class_ids = detection_supervision.class_id
+
+        keep = np.ones(len(detection_supervision), dtype=bool)
+
+        referee_indices = np.where(class_ids == referee_id)[0]
+        player_indices = np.where(class_ids == player_id)[0]
+
+        for p_idx in player_indices:
+            p_box = boxes[p_idx]
+
+            for r_idx in referee_indices:
+                r_box = boxes[r_idx]
+
+                iou = self.bbox_iou(p_box, r_box)
+
+                if iou > 0.35:
+                    keep[p_idx] = False
+                    break
+
+        return detection_supervision[keep]
+
+    def bbox_iou(self, box_a, box_b):
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+
+        inter_w = max(0, inter_x2 - inter_x1)
+        inter_h = max(0, inter_y2 - inter_y1)
+
+        inter_area = inter_w * inter_h
+
+        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+        area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+
+        union = area_a + area_b - inter_area
+
+        if union <= 0:
+            return 0.0
+
+        return inter_area / union
+
+    def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
+        if read_from_stub and stub_path is not None and os.path.exists(stub_path):
+            with open(stub_path, "rb") as f:
+                tracks = pickle.load(f)
+            return tracks
+
+        detections = self.detect_frames(frames)
+        ball_detections = self.detect_ball_frames(frames)
+
+        tracks = {
+            "players": [],
+            "referees": [],
+            "ball": []
+        }
+
+        new_ball_model_used = 0
+        normal_ball_used = 0
+        missed_ball = 0
+        rejected_by_motion = 0
+        rejected_by_filter = 0
+
+        for frame_num, detection in enumerate(detections):
+            cls_names = detection.names
+            cls_names_inv = {v: k for k, v in cls_names.items()}
+
+            detection_supervision = sv.Detections.from_ultralytics(detection)
+
+            # Convert goalkeeper to player if both exist.
+            if "goalkeeper" in cls_names_inv and "player" in cls_names_inv:
+                goalkeeper_id = cls_names_inv["goalkeeper"]
+                player_id = cls_names_inv["player"]
+
+                for object_ind, class_id in enumerate(detection_supervision.class_id):
+                    if class_id == goalkeeper_id:
+                        detection_supervision.class_id[object_ind] = player_id
+
+            # Keep only players and referees for ByteTrack.
+            allowed_class_ids = []
+
+            if "player" in cls_names_inv:
+                allowed_class_ids.append(cls_names_inv["player"])
+
+            if "referee" in cls_names_inv:
+                allowed_class_ids.append(cls_names_inv["referee"])
+
+            if len(allowed_class_ids) > 0 and len(detection_supervision) > 0:
+                mask = np.isin(detection_supervision.class_id, allowed_class_ids)
+                detection_supervision = detection_supervision[mask]
+
+            detection_supervision = self.remove_duplicate_player_referee_boxes(
+                detection_supervision=detection_supervision,
+                cls_names_inv=cls_names_inv
+            )
+
+            detection_with_tracks = self.tracker.update_with_detections(
+                detection_supervision
+            )
+
+            tracks["players"].append({})
+            tracks["referees"].append({})
+            tracks["ball"].append({})
+
+            for frame_detection in detection_with_tracks:
+                bbox = frame_detection[0].tolist()
+                cls_id = frame_detection[3]
+                track_id = int(frame_detection[4])
+
+                if "player" in cls_names_inv and cls_id == cls_names_inv["player"]:
+                    tracks["players"][frame_num][track_id] = {"bbox": bbox}
+
+                if "referee" in cls_names_inv and cls_id == cls_names_inv["referee"]:
+                    tracks["referees"][frame_num][track_id] = {"bbox": bbox}
+
+            ball_bbox = None
+            ball_source = None
+
+            # 1) Custom ball model
+            if self.use_new_ball_model:
+                ball_bbox = self.get_ball_bbox_from_ball_model(
+                    ball_detections[frame_num],
+                    frames[frame_num]
+                )
+
+                if ball_bbox is not None:
+                    ball_source = "custom"
+
+            # 2) Normal model fallback
+            if ball_bbox is None:
+                ball_bbox = self.get_ball_bbox_from_normal_detection(
+                    detection,
+                    frames[frame_num]
+                )
+
+                if ball_bbox is not None:
+                    ball_source = "normal"
+
+            if ball_bbox is not None:
+                previous_ball_bbox = self.get_previous_ball_bbox(
+                    tracks=tracks,
+                    frame_num=frame_num,
+                    lookback=8
+                )
+
+                valid_motion = self.is_valid_ball_motion(
+                    current_bbox=ball_bbox,
+                    previous_bbox=previous_ball_bbox,
+                    frame_shape=frames[frame_num].shape
+                )
+
+                if valid_motion:
+                    tracks["ball"][frame_num][1] = {"bbox": ball_bbox}
+
+                    if ball_source == "custom":
+                        new_ball_model_used += 1
+                    elif ball_source == "normal":
+                        normal_ball_used += 1
+                else:
+                    rejected_by_motion += 1
+                    missed_ball += 1
+            else:
+                missed_ball += 1
+
+        print(
+            f"Ball detection | custom model: {new_ball_model_used}, "
+            f"normal fallback: {normal_ball_used}, "
+            f"missed: {missed_ball}, "
+            f"rejected motion: {rejected_by_motion}, "
+            f"rejected filter: {rejected_by_filter}"
+        )
+
+        if stub_path is not None:
+            with open(stub_path, "wb") as f:
+                pickle.dump(tracks, f)
+
+        return tracks
+
+    def draw_ellipse(self, frame, bbox, color, track_id=None):
+        y2 = int(bbox[3])
+        x_center, _ = get_center_of_bbox(bbox)
+        width = get_bbox_width(bbox)
+
+        cv2.ellipse(
+            frame,
+            center=(x_center, y2),
+            axes=(int(width), int(0.35 * width)),
+            angle=0.0,
+            startAngle=-45,
+            endAngle=235,
+            color=color,
+            thickness=2,
+            lineType=cv2.LINE_4
+        )
+
+        rectangle_width = 40
+        rectangle_height = 20
+        x1_rect = x_center - rectangle_width // 2
+        x2_rect = x_center + rectangle_width // 2
+        y1_rect = (y2 - rectangle_height // 2) + 15
+        y2_rect = (y2 + rectangle_height // 2) + 15
+
+        if track_id is not None:
+            cv2.rectangle(
+                frame,
+                (int(x1_rect), int(y1_rect)),
+                (int(x2_rect), int(y2_rect)),
+                color,
+                cv2.FILLED
+            )
+
+            x1_text = x1_rect + 12
+
+            if track_id > 99:
+                x1_text -= 10
+
+            cv2.putText(
+                frame,
+                f"{track_id}",
+                (int(x1_text), int(y1_rect + 15)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 0, 0),
+                2
+            )
+
+        return frame
+
+    def draw_triangle(self, frame, bbox, color):
+        y = int(bbox[1])
+        x, _ = get_center_of_bbox(bbox)
+
+        triangle_points = np.array([
+            [x, y],
+            [x - 10, y - 20],
+            [x + 10, y - 20],
+        ])
+
+        cv2.drawContours(frame, [triangle_points], 0, color, cv2.FILLED)
+        cv2.drawContours(frame, [triangle_points], 0, (0, 0, 0), 2)
+
+        return frame
+
+    def draw_traingle(self, frame, bbox, color):
+        # Kept for compatibility with your old code typo.
+        return self.draw_triangle(frame, bbox, color)
+
+    def draw_ball_marker(self, frame, bbox, color=(0, 255, 0)):
+        x1, y1, x2, y2 = bbox
+        cx, cy = get_center_of_bbox(bbox)
+
+        radius = max(5, int(max(x2 - x1, y2 - y1) * 0.8))
+
+        cv2.circle(
+            frame,
+            (int(cx), int(cy)),
+            radius,
+            color,
+            2
+        )
+
+        cv2.circle(
+            frame,
+            (int(cx), int(cy)),
+            2,
+            color,
+            -1
+        )
+
+        if self.draw_ball_label:
+            cv2.putText(
+                frame,
+                "BALL",
+                (int(cx + 8), int(cy - 8)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                2
+            )
+
+        return frame
+
+    def draw_team_ball_control(self, frame, global_frame_num, team_ball_control):
+        overlay = frame.copy()
+        height, width = frame.shape[:2]
+
+        x1 = int(width * 0.70)
+        y1 = int(height * 0.82)
+        x2 = int(width * 0.98)
+        y2 = int(height * 0.95)
+
+        cv2.rectangle(
+            overlay,
+            (x1, y1),
+            (x2, y2),
+            (255, 255, 255),
+            -1
+        )
+
+        alpha = 0.4
+        cv2.addWeighted(
+            overlay,
+            alpha,
+            frame,
+            1 - alpha,
+            0,
+            frame
+        )
+
+        if len(team_ball_control) == 0:
+            team_1 = 0
+            team_2 = 0
+        else:
+            team_ball_control_till_frame = team_ball_control[:global_frame_num + 1]
+
+            team_1_num_frames = team_ball_control_till_frame[
+                team_ball_control_till_frame == 1
+            ].shape[0]
+
+            team_2_num_frames = team_ball_control_till_frame[
+                team_ball_control_till_frame == 2
+            ].shape[0]
+
+            total_frames = team_1_num_frames + team_2_num_frames
+
+            if total_frames == 0:
+                team_1 = 0
+                team_2 = 0
+            else:
+                team_1 = team_1_num_frames / total_frames
+                team_2 = team_2_num_frames / total_frames
+
+        cv2.putText(
+            frame,
+            f"Team 1 Ball Control: {team_1 * 100:.2f}%",
+            (x1 + 20, y1 + 45),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 0),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"Team 2 Ball Control: {team_2 * 100:.2f}%",
+            (x1 + 20, y1 + 90),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 0),
+            2
+        )
+
+        return frame
+
+    def draw_annotations(
+        self,
+        video_frames,
+        tracks,
+        team_ball_control,
+        frame_offset=0,
+        game_state_per_frame=None
+    ):
+        output_video_frames = []
+
+        for frame_num, frame in enumerate(video_frames):
+            frame = frame.copy()
+
+            player_dict = tracks["players"][frame_num]
+            ball_dict = tracks["ball"][frame_num]
+            referee_dict = tracks["referees"][frame_num]
+
+            # Draw players
+            for track_id, player in player_dict.items():
+                color = player.get("team_color", (0, 0, 255))
+
+                frame = self.draw_ellipse(
+                    frame,
+                    player["bbox"],
+                    color,
+                    track_id
+                )
+
+                if player.get("has_ball", False):
+                    frame = self.draw_triangle(
+                        frame,
+                        player["bbox"],
+                        (0, 0, 255)
+                    )
+
+            # Draw referees with fixed color only.
+            for _, referee in referee_dict.items():
+                frame = self.draw_ellipse(
+                    frame,
+                    referee["bbox"],
+                    (0, 255, 255)
+                )
+
+            # Draw ball as circle, not the same possession triangle.
+            for _, ball in ball_dict.items():
+                frame = self.draw_ball_marker(
+                    frame,
+                    ball["bbox"],
+                    (0, 255, 0)
+                )
+
+            global_frame_num = frame_offset + frame_num
+
+            frame = self.draw_team_ball_control(
+                frame,
+                global_frame_num,
+                team_ball_control
+            )
+
+            # Optional game-state label
+            if game_state_per_frame is not None and frame_num < len(game_state_per_frame):
+                state_info = game_state_per_frame[frame_num]
+                state = state_info.get("state", "UNKNOWN")
+                reason = state_info.get("reason", "")
+
+                label = f"State: {state}"
+                if reason:
+                    label += f" | {reason}"
+
+                cv2.putText(
+                    frame,
+                    label,
+                    (30, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (255, 255, 255),
+                    3
+                )
+
+                cv2.putText(
+                    frame,
+                    label,
+                    (30, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 0),
+                    1
+                )
+
+            output_video_frames.append(frame)
+
+        return output_video_frames
