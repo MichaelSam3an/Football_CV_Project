@@ -7,10 +7,14 @@ import pandas as pd
 import cv2
 import sys
 from pathlib import Path
+import torch
 
 sys.path.append("../")
 
 from utils import get_center_of_bbox, get_bbox_width, get_foot_position
+
+
+DEVICE = 0 if torch.cuda.is_available() else "cpu"
 
 
 class Tracker:
@@ -22,8 +26,9 @@ class Tracker:
     ):
         self.model_path = model_path
         self.ball_model_path = ball_model_path
+        self.device = DEVICE
 
-        # Main YOLO model: players + referees
+        # Main YOLO model: players + referees + goalkeeper
         self.model = YOLO(model_path)
 
         # Optional custom YOLO model: ball only
@@ -36,7 +41,6 @@ class Tracker:
                     f"Ball model not found: {ball_model_path}\n"
                     f"Put yolov8s_ball_best.pt inside the models folder."
                 )
-
             self.ball_model = YOLO(ball_model_path)
 
         self.tracker = sv.ByteTrack()
@@ -55,7 +59,7 @@ class Tracker:
         self.max_ball_jump_ratio = 0.16
 
         # Play-area margins
-        # These are intentionally not too strict because the ball may go near touchlines.
+        # Not too strict because the ball may go near touchlines.
         self.play_area_left_ratio = 0.01
         self.play_area_right_ratio = 0.99
         self.play_area_top_ratio = 0.03
@@ -82,12 +86,9 @@ class Tracker:
 
     def interpolate_ball_positions(self, ball_positions, max_gap=None):
         """
-        Interpolates only short missing gaps.
-
-        Long missing gaps stay empty. This avoids creating fake ball positions
-        when the ball disappears for a long time.
+        Interpolate only short missing gaps.
+        Long missing gaps stay empty.
         """
-
         if max_gap is None:
             max_gap = self.max_ball_interpolation_gap
 
@@ -101,10 +102,7 @@ class Tracker:
             else:
                 clean_ball_positions.append(bbox)
 
-        df = pd.DataFrame(
-            clean_ball_positions,
-            columns=["x1", "y1", "x2", "y2"]
-        )
+        df = pd.DataFrame(clean_ball_positions, columns=["x1", "y1", "x2", "y2"])
 
         df = df.interpolate(
             method="linear",
@@ -130,11 +128,10 @@ class Tracker:
             detections_batch = self.model.predict(
                 frames[i:i + batch_size],
                 conf=self.main_conf,
-                device="cpu",
+                device=self.device,
                 imgsz=self.main_imgsz,
                 verbose=False
             )
-
             detections += detections_batch
 
         return detections
@@ -150,14 +147,37 @@ class Tracker:
             detections_batch = self.ball_model.predict(
                 frames[i:i + batch_size],
                 conf=self.ball_conf,
-                device="cpu",
+                device=self.device,
                 imgsz=self.ball_imgsz,
                 verbose=False
             )
-
             ball_detections += detections_batch
 
         return ball_detections
+
+    def bbox_iou(self, box_a, box_b):
+        ax1, ay1, ax2, ay2 = box_a
+        bx1, by1, bx2, by2 = box_b
+
+        inter_x1 = max(ax1, bx1)
+        inter_y1 = max(ay1, by1)
+        inter_x2 = min(ax2, bx2)
+        inter_y2 = min(ay2, by2)
+
+        inter_w = max(0, inter_x2 - inter_x1)
+        inter_h = max(0, inter_y2 - inter_y1)
+
+        inter_area = inter_w * inter_h
+
+        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+        area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
+
+        union = area_a + area_b - inter_area
+
+        if union <= 0:
+            return 0.0
+
+        return inter_area / union
 
     def is_reasonable_ball_size(self, bbox, frame_shape):
         frame_height, frame_width = frame_shape[:2]
@@ -196,12 +216,9 @@ class Tracker:
 
     def is_valid_ball_motion(self, current_bbox, previous_bbox, frame_shape):
         """
-        Rejects impossible one-frame ball jumps.
-
-        This is intentionally not too strict because real football movement can
-        be fast. More advanced analytics filtering is done in main.py.
+        Reject impossible one-frame ball jumps.
+        This is intentionally not too strict because real football movement can be fast.
         """
-
         if previous_bbox is None:
             return True
 
@@ -217,10 +234,7 @@ class Tracker:
 
         max_allowed_jump = frame_diag * self.max_ball_jump_ratio
 
-        if distance > max_allowed_jump:
-            return False
-
-        return True
+        return distance <= max_allowed_jump
 
     def get_ball_bbox_from_ball_model(self, detection, frame):
         if detection is None or detection.boxes is None:
@@ -246,20 +260,18 @@ class Tracker:
         return best_bbox
 
     def get_ball_bbox_from_normal_detection(self, detection, frame):
-        names = detection.names
+        if detection is None or detection.boxes is None:
+            return None
 
+        names = detection.names
         best_bbox = None
         best_score = 0
-
-        if detection.boxes is None:
-            return None
 
         for box in detection.boxes:
             cls_id = int(box.cls[0])
             score = float(box.conf[0])
 
             class_name = str(names.get(cls_id, "")).lower().strip()
-
             if class_name != "ball":
                 continue
 
@@ -282,25 +294,16 @@ class Tracker:
 
         for prev_frame_num in range(frame_num - 1, start - 1, -1):
             previous_bbox = tracks["ball"][prev_frame_num].get(1, {}).get("bbox", None)
-
             if previous_bbox is not None:
                 return previous_bbox
 
         return None
 
-    def remove_duplicate_player_referee_boxes(
-        self,
-        detection_supervision,
-        cls_names_inv
-    ):
+    def remove_duplicate_player_referee_boxes(self, detection_supervision, cls_names_inv):
         """
-        Optional cleanup:
-        if the same area is detected as both player and referee, keep referee.
-
-        This reduces cases where a referee is also tracked as a player and then
-        gets team-colored later.
+        If a box overlaps heavily with a referee box, drop the player box.
+        This reduces referee/player cross-label confusion.
         """
-
         if len(detection_supervision) == 0:
             return detection_supervision
 
@@ -320,41 +323,14 @@ class Tracker:
 
         for p_idx in player_indices:
             p_box = boxes[p_idx]
-
             for r_idx in referee_indices:
                 r_box = boxes[r_idx]
-
                 iou = self.bbox_iou(p_box, r_box)
-
                 if iou > 0.35:
                     keep[p_idx] = False
                     break
 
         return detection_supervision[keep]
-
-    def bbox_iou(self, box_a, box_b):
-        ax1, ay1, ax2, ay2 = box_a
-        bx1, by1, bx2, by2 = box_b
-
-        inter_x1 = max(ax1, bx1)
-        inter_y1 = max(ay1, by1)
-        inter_x2 = min(ax2, bx2)
-        inter_y2 = min(ay2, by2)
-
-        inter_w = max(0, inter_x2 - inter_x1)
-        inter_h = max(0, inter_y2 - inter_y1)
-
-        inter_area = inter_w * inter_h
-
-        area_a = max(0, ax2 - ax1) * max(0, ay2 - ay1)
-        area_b = max(0, bx2 - bx1) * max(0, by2 - by1)
-
-        union = area_a + area_b - inter_area
-
-        if union <= 0:
-            return 0.0
-
-        return inter_area / union
 
     def get_object_tracks(self, frames, read_from_stub=False, stub_path=None):
         if read_from_stub and stub_path is not None and os.path.exists(stub_path):
@@ -394,10 +370,8 @@ class Tracker:
 
             # Keep only players and referees for ByteTrack.
             allowed_class_ids = []
-
             if "player" in cls_names_inv:
                 allowed_class_ids.append(cls_names_inv["player"])
-
             if "referee" in cls_names_inv:
                 allowed_class_ids.append(cls_names_inv["referee"])
 
@@ -438,7 +412,6 @@ class Tracker:
                     ball_detections[frame_num],
                     frames[frame_num]
                 )
-
                 if ball_bbox is not None:
                     ball_source = "custom"
 
@@ -448,7 +421,6 @@ class Tracker:
                     detection,
                     frames[frame_num]
                 )
-
                 if ball_bbox is not None:
                     ball_source = "normal"
 
@@ -526,7 +498,6 @@ class Tracker:
             )
 
             x1_text = x1_rect + 12
-
             if track_id > 99:
                 x1_text -= 10
 
@@ -558,7 +529,7 @@ class Tracker:
         return frame
 
     def draw_traingle(self, frame, bbox, color):
-        # Kept for compatibility with your old code typo.
+        # Compatibility with the old typo.
         return self.draw_triangle(frame, bbox, color)
 
     def draw_ball_marker(self, frame, bbox, color=(0, 255, 0)):
@@ -703,7 +674,7 @@ class Tracker:
                         (0, 0, 255)
                     )
 
-            # Draw referees with fixed color only.
+            # Draw referees with fixed color only
             for _, referee in referee_dict.items():
                 frame = self.draw_ellipse(
                     frame,
@@ -711,7 +682,7 @@ class Tracker:
                     (0, 255, 255)
                 )
 
-            # Draw ball as circle, not the same possession triangle.
+            # Draw ball separately so it never gets team styling
             for _, ball in ball_dict.items():
                 frame = self.draw_ball_marker(
                     frame,
@@ -746,7 +717,6 @@ class Tracker:
                     (255, 255, 255),
                     3
                 )
-
                 cv2.putText(
                     frame,
                     label,
