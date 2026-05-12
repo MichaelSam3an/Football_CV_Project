@@ -59,14 +59,10 @@ class Tracker:
         self.max_ball_jump_ratio = 0.16
 
         # Play-area margins
-        # Not too strict because the ball may go near touchlines.
         self.play_area_left_ratio = 0.01
         self.play_area_right_ratio = 0.99
         self.play_area_top_ratio = 0.03
         self.play_area_bottom_ratio = 0.98
-
-        # Drawing settings
-        self.draw_ball_label = True
 
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
@@ -85,10 +81,6 @@ class Tracker:
                     tracks[object_name][frame_num][track_id]["position"] = position
 
     def interpolate_ball_positions(self, ball_positions, max_gap=None):
-        """
-        Interpolate only short missing gaps.
-        Long missing gaps stay empty.
-        """
         if max_gap is None:
             max_gap = self.max_ball_interpolation_gap
 
@@ -215,10 +207,6 @@ class Tracker:
         return True
 
     def is_valid_ball_motion(self, current_bbox, previous_bbox, frame_shape):
-        """
-        Reject impossible one-frame ball jumps.
-        This is intentionally not too strict because real football movement can be fast.
-        """
         if previous_bbox is None:
             return True
 
@@ -300,10 +288,6 @@ class Tracker:
         return None
 
     def remove_duplicate_player_referee_boxes(self, detection_supervision, cls_names_inv):
-        """
-        If a box overlaps heavily with a referee box, drop the player box.
-        This reduces referee/player cross-label confusion.
-        """
         if len(detection_supervision) == 0:
             return detection_supervision
 
@@ -359,7 +343,6 @@ class Tracker:
 
             detection_supervision = sv.Detections.from_ultralytics(detection)
 
-            # Convert goalkeeper to player if both exist.
             if "goalkeeper" in cls_names_inv and "player" in cls_names_inv:
                 goalkeeper_id = cls_names_inv["goalkeeper"]
                 player_id = cls_names_inv["player"]
@@ -368,10 +351,11 @@ class Tracker:
                     if class_id == goalkeeper_id:
                         detection_supervision.class_id[object_ind] = player_id
 
-            # Keep only players and referees for ByteTrack.
             allowed_class_ids = []
+
             if "player" in cls_names_inv:
                 allowed_class_ids.append(cls_names_inv["player"])
+
             if "referee" in cls_names_inv:
                 allowed_class_ids.append(cls_names_inv["referee"])
 
@@ -406,7 +390,6 @@ class Tracker:
             ball_bbox = None
             ball_source = None
 
-            # 1) Custom ball model
             if self.use_new_ball_model:
                 ball_bbox = self.get_ball_bbox_from_ball_model(
                     ball_detections[frame_num],
@@ -415,7 +398,6 @@ class Tracker:
                 if ball_bbox is not None:
                     ball_source = "custom"
 
-            # 2) Normal model fallback
             if ball_bbox is None:
                 ball_bbox = self.get_ball_bbox_from_normal_detection(
                     detection,
@@ -529,41 +511,15 @@ class Tracker:
         return frame
 
     def draw_traingle(self, frame, bbox, color):
-        # Compatibility with the old typo.
         return self.draw_triangle(frame, bbox, color)
 
     def draw_ball_marker(self, frame, bbox, color=(0, 255, 0)):
-        x1, y1, x2, y2 = bbox
         cx, cy = get_center_of_bbox(bbox)
+        x1, y1, x2, y2 = bbox
+        size = max(6, int(max(x2 - x1, y2 - y1) * 0.7))
 
-        radius = max(5, int(max(x2 - x1, y2 - y1) * 0.8))
-
-        cv2.circle(
-            frame,
-            (int(cx), int(cy)),
-            radius,
-            color,
-            2
-        )
-
-        cv2.circle(
-            frame,
-            (int(cx), int(cy)),
-            2,
-            color,
-            -1
-        )
-
-        if self.draw_ball_label:
-            cv2.putText(
-                frame,
-                "BALL",
-                (int(cx + 8), int(cy - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                color,
-                2
-            )
+        cv2.circle(frame, (int(cx), int(cy)), size, color, 2)
+        cv2.circle(frame, (int(cx), int(cy)), 2, color, -1)
 
         return frame
 
@@ -571,7 +527,7 @@ class Tracker:
         overlay = frame.copy()
         height, width = frame.shape[:2]
 
-        x1 = int(width * 0.70)
+        x1 = int(width * 0.74)
         y1 = int(height * 0.82)
         x2 = int(width * 0.98)
         y2 = int(height * 0.95)
@@ -584,15 +540,7 @@ class Tracker:
             -1
         )
 
-        alpha = 0.4
-        cv2.addWeighted(
-            overlay,
-            alpha,
-            frame,
-            1 - alpha,
-            0,
-            frame
-        )
+        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
 
         if len(team_ball_control) == 0:
             team_1 = 0
@@ -620,21 +568,23 @@ class Tracker:
         cv2.putText(
             frame,
             f"Team 1 Ball Control: {team_1 * 100:.2f}%",
-            (x1 + 20, y1 + 45),
+            (x1 + 12, y1 + 28),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
+            0.55,
             (0, 0, 0),
-            2
+            2,
+            cv2.LINE_AA
         )
 
         cv2.putText(
             frame,
             f"Team 2 Ball Control: {team_2 * 100:.2f}%",
-            (x1 + 20, y1 + 90),
+            (x1 + 12, y1 + 58),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
+            0.55,
             (0, 0, 0),
-            2
+            2,
+            cv2.LINE_AA
         )
 
         return frame
@@ -656,7 +606,6 @@ class Tracker:
             ball_dict = tracks["ball"][frame_num]
             referee_dict = tracks["referees"][frame_num]
 
-            # Draw players
             for track_id, player in player_dict.items():
                 color = player.get("team_color", (0, 0, 255))
 
@@ -674,7 +623,6 @@ class Tracker:
                         (0, 0, 255)
                     )
 
-            # Draw referees with fixed color only
             for _, referee in referee_dict.items():
                 frame = self.draw_ellipse(
                     frame,
@@ -682,7 +630,6 @@ class Tracker:
                     (0, 255, 255)
                 )
 
-            # Draw ball separately so it never gets team styling
             for _, ball in ball_dict.items():
                 frame = self.draw_ball_marker(
                     frame,
@@ -697,35 +644,6 @@ class Tracker:
                 global_frame_num,
                 team_ball_control
             )
-
-            # Optional game-state label
-            if game_state_per_frame is not None and frame_num < len(game_state_per_frame):
-                state_info = game_state_per_frame[frame_num]
-                state = state_info.get("state", "UNKNOWN")
-                reason = state_info.get("reason", "")
-
-                label = f"State: {state}"
-                if reason:
-                    label += f" | {reason}"
-
-                cv2.putText(
-                    frame,
-                    label,
-                    (30, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (255, 255, 255),
-                    3
-                )
-                cv2.putText(
-                    frame,
-                    label,
-                    (30, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 0, 0),
-                    1
-                )
 
             output_video_frames.append(frame)
 
