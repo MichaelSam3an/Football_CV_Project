@@ -451,6 +451,10 @@ class Tracker:
         x_center, _ = get_center_of_bbox(bbox)
         width = get_bbox_width(bbox)
 
+        # === Scale based on player size ===
+        scale = max(0.5, width / 60)
+
+        # Ellipse (cleaner rendering)
         cv2.ellipse(
             frame,
             center=(x_center, y2),
@@ -459,38 +463,46 @@ class Tracker:
             startAngle=-45,
             endAngle=235,
             color=color,
-            thickness=2,
-            lineType=cv2.LINE_4
+            thickness=max(1, int(2 * scale)),
+            lineType=cv2.LINE_AA
         )
 
-        rectangle_width = 40
-        rectangle_height = 20
-        x1_rect = x_center - rectangle_width // 2
-        x2_rect = x_center + rectangle_width // 2
-        y1_rect = (y2 - rectangle_height // 2) + 15
-        y2_rect = (y2 + rectangle_height // 2) + 15
+    # === Dynamic label box ===
+        rect_w = int(28 * scale)
+        rect_h = int(16 * scale)
+
+        x1 = int(x_center - rect_w // 2)
+        x2 = int(x_center + rect_w // 2)
+        y1 = int(y2 + 8 * scale)
+        y2_rect = int(y1 + rect_h)
 
         if track_id is not None:
-            cv2.rectangle(
-                frame,
-                (int(x1_rect), int(y1_rect)),
-                (int(x2_rect), int(y2_rect)),
-                color,
-                cv2.FILLED
+            cv2.rectangle(frame, (x1, y1), (x2, y2_rect), color, cv2.FILLED)
+
+            # === Centered text ===
+            font_scale = 0.45 * scale
+            thickness = max(1, int(2 * scale))
+
+            text = str(track_id)
+            (tw, th), _ = cv2.getTextSize(
+                text,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                font_scale,
+                thickness
             )
 
-            x1_text = x1_rect + 12
-            if track_id > 99:
-                x1_text -= 10
+            text_x = int(x_center - tw // 2)
+            text_y = int(y1 + th + 2 * scale)
 
             cv2.putText(
                 frame,
-                f"{track_id}",
-                (int(x1_text), int(y1_rect + 15)),
+                text,
+                (text_x, text_y),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
+                font_scale,
                 (0, 0, 0),
-                2
+                thickness,
+                cv2.LINE_AA
             )
 
         return frame
