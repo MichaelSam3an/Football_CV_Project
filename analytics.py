@@ -16,15 +16,64 @@ class MatchAnalytics:
 
         self.last_player_with_ball = None
 
+        # Heatmap tuning
+        self.heatmap_bins = 100
+        self.heatmap_blur_sigma = 2.2
+        self.heatmap_min_relative = 0.0
+        self.heatmap_max_relative = 1.0
+        self.heatmap_use_live_play_only = True
+
+    @staticmethod
+    def _get_xy_from_position(position):
+        if position is None:
+            return None, None
+
+        if not isinstance(position, (tuple, list, np.ndarray)):
+            return None, None
+
+        if len(position) < 2:
+            return None, None
+
+        x, y = position[0], position[1]
+
+        if x is None or y is None:
+            return None, None
+
+        try:
+            return float(x), float(y)
+        except (TypeError, ValueError):
+            return None, None
+
+    @staticmethod
+    def _is_valid_xy(x, y):
+        if x is None or y is None:
+            return False
+
+        if np.isnan(x) or np.isnan(y):
+            return False
+
+        return True
+
     def collect_chunk_data(
         self,
         tracks,
         frame_offset,
         frame_width,
-        frame_height
+        frame_height,
+        game_state_per_frame=None
     ):
+        """
+        Collects frame-by-frame player and ball data.
+
+        Uses adjusted positions when available so camera motion does not distort
+        the analytics as much.
+        """
         for local_frame_num, player_track in enumerate(tracks["players"]):
             global_frame_num = frame_offset + local_frame_num
+
+            frame_state = None
+            if game_state_per_frame is not None and local_frame_num < len(game_state_per_frame):
+                frame_state = game_state_per_frame[local_frame_num].get("state", None)
 
             ball_bbox = tracks["ball"][local_frame_num].get(1, {}).get("bbox", None)
 
@@ -34,6 +83,7 @@ class MatchAnalytics:
 
                 self.ball_rows.append({
                     "frame": global_frame_num,
+                    "state": frame_state,
                     "ball_x": ball_center_x,
                     "ball_y": ball_center_y,
                     "ball_x_relative": ball_center_x / frame_width,
@@ -41,26 +91,36 @@ class MatchAnalytics:
                 })
 
             for player_id, player in player_track.items():
-                position = player.get("position", (None, None))
+                raw_position = player.get("position", None)
+                adjusted_position = player.get("position_adjusted", None)
+
+                x_raw, y_raw = self._get_xy_from_position(raw_position)
+                x_adj, y_adj = self._get_xy_from_position(adjusted_position)
+
                 team = player.get("team", None)
                 has_ball = player.get("has_ball", False)
                 bbox = player.get("bbox", None)
 
-                x = position[0] if position else None
-                y = position[1] if position else None
+                x_raw_relative = x_raw / frame_width if self._is_valid_xy(x_raw, y_raw) else None
+                y_raw_relative = y_raw / frame_height if self._is_valid_xy(x_raw, y_raw) else None
 
-                x_relative = x / frame_width if x is not None else None
-                y_relative = y / frame_height if y is not None else None
+                x_adj_relative = x_adj / frame_width if self._is_valid_xy(x_adj, y_adj) else None
+                y_adj_relative = y_adj / frame_height if self._is_valid_xy(x_adj, y_adj) else None
 
                 self.player_rows.append({
                     "frame": global_frame_num,
+                    "state": frame_state,
                     "player_id": player_id,
                     "team": team,
                     "has_ball": has_ball,
-                    "x": x,
-                    "y": y,
-                    "x_relative": x_relative,
-                    "y_relative": y_relative,
+                    "x": x_raw,
+                    "y": y_raw,
+                    "x_relative": x_raw_relative,
+                    "y_relative": y_raw_relative,
+                    "x_adjusted": x_adj,
+                    "y_adjusted": y_adj,
+                    "x_adjusted_relative": x_adj_relative,
+                    "y_adjusted_relative": y_adj_relative,
                     "bbox": bbox
                 })
 
@@ -138,7 +198,29 @@ class MatchAnalytics:
         if player_df.empty:
             return
 
-        player_df = player_df.dropna(subset=["team", "x_relative", "y_relative"])
+        # Prefer adjusted positions for formations if available
+        if "x_adjusted_relative" in player_df.columns and "y_adjusted_relative" in player_df.columns:
+            player_df["heatmap_x"] = player_df["x_adjusted_relative"].where(
+                player_df["x_adjusted_relative"].notna(),
+                player_df["x_relative"]
+            )
+            player_df["heatmap_y"] = player_df["y_adjusted_relative"].where(
+                player_df["y_adjusted_relative"].notna(),
+                player_df["y_relative"]
+            )
+        else:
+            player_df["heatmap_x"] = player_df["x_relative"]
+            player_df["heatmap_y"] = player_df["y_relative"]
+
+        player_df = player_df.dropna(subset=["team", "heatmap_x", "heatmap_y"])
+
+        # Only keep plausible pitch coordinates
+        player_df = player_df[
+            (player_df["heatmap_x"] >= self.heatmap_min_relative) &
+            (player_df["heatmap_x"] <= self.heatmap_max_relative) &
+            (player_df["heatmap_y"] >= self.heatmap_min_relative) &
+            (player_df["heatmap_y"] <= self.heatmap_max_relative)
+        ]
 
         for team in [1, 2]:
             team_df = player_df[player_df["team"] == team]
@@ -147,8 +229,8 @@ class MatchAnalytics:
                 continue
 
             formation_df = team_df.groupby("player_id").agg({
-                "x_relative": "mean",
-                "y_relative": "mean",
+                "heatmap_x": "mean",
+                "heatmap_y": "mean",
                 "frame": "count"
             }).reset_index()
 
@@ -159,13 +241,75 @@ class MatchAnalytics:
                 index=False
             )
 
+    def _make_heatmap_array(self, team_df, x_col, y_col):
+        x = team_df[x_col].to_numpy(dtype=np.float32)
+        y = team_df[y_col].to_numpy(dtype=np.float32)
+
+        valid_mask = np.isfinite(x) & np.isfinite(y)
+        x = x[valid_mask]
+        y = y[valid_mask]
+
+        if len(x) == 0:
+            return None
+
+        # Clip to normalized pitch bounds
+        x = np.clip(x, self.heatmap_min_relative, self.heatmap_max_relative)
+        y = np.clip(y, self.heatmap_min_relative, self.heatmap_max_relative)
+
+        hist, x_edges, y_edges = np.histogram2d(
+            x,
+            y,
+            bins=self.heatmap_bins,
+            range=[
+                [self.heatmap_min_relative, self.heatmap_max_relative],
+                [self.heatmap_min_relative, self.heatmap_max_relative]
+            ]
+        )
+
+        # Smooth the blocky bins
+        hist = cv2.GaussianBlur(
+            hist.astype(np.float32),
+            (0, 0),
+            sigmaX=self.heatmap_blur_sigma,
+            sigmaY=self.heatmap_blur_sigma
+        )
+
+        return hist
+
     def save_heatmaps(self):
         player_df = pd.DataFrame(self.player_rows)
 
         if player_df.empty:
             return
 
-        player_df = player_df.dropna(subset=["team", "x_relative", "y_relative"])
+        # Prefer adjusted positions if available
+        if "x_adjusted_relative" in player_df.columns and "y_adjusted_relative" in player_df.columns:
+            player_df["heatmap_x"] = player_df["x_adjusted_relative"].where(
+                player_df["x_adjusted_relative"].notna(),
+                player_df["x_relative"]
+            )
+            player_df["heatmap_y"] = player_df["y_adjusted_relative"].where(
+                player_df["y_adjusted_relative"].notna(),
+                player_df["y_relative"]
+            )
+        else:
+            player_df["heatmap_x"] = player_df["x_relative"]
+            player_df["heatmap_y"] = player_df["y_relative"]
+
+        player_df = player_df.dropna(subset=["team", "heatmap_x", "heatmap_y"])
+
+        # Optionally keep only live-play frames if game state was collected
+        if self.heatmap_use_live_play_only and "state" in player_df.columns:
+            live_mask = player_df["state"].isna() | (player_df["state"] == "LIVE_PLAY")
+            player_df = player_df[live_mask]
+
+        # Remove impossible values / edge garbage
+        player_df = player_df[
+            (player_df["heatmap_x"] >= self.heatmap_min_relative) &
+            (player_df["heatmap_x"] <= self.heatmap_max_relative) &
+            (player_df["heatmap_y"] >= self.heatmap_min_relative) &
+            (player_df["heatmap_y"] <= self.heatmap_max_relative)
+        ]
 
         for team in [1, 2]:
             team_df = player_df[player_df["team"] == team]
@@ -173,23 +317,40 @@ class MatchAnalytics:
             if team_df.empty:
                 continue
 
+            heatmap = self._make_heatmap_array(team_df, "heatmap_x", "heatmap_y")
+
+            if heatmap is None:
+                continue
+
+            # Normalize for display
+            max_value = np.max(heatmap)
+            if max_value > 0:
+                heatmap = heatmap / max_value
+
             plt.figure(figsize=(10, 6))
-            plt.hist2d(
-                team_df["x_relative"],
-                team_df["y_relative"],
-                bins=50
+            plt.imshow(
+                heatmap.T,
+                origin="upper",
+                extent=[
+                    self.heatmap_min_relative,
+                    self.heatmap_max_relative,
+                    self.heatmap_max_relative,
+                    self.heatmap_min_relative
+                ],
+                cmap="plasma",
+                aspect="auto",
+                interpolation="bilinear"
             )
-            plt.gca().invert_yaxis()
             plt.title(f"Team {team} Relative Position Heatmap")
             plt.xlabel("Relative Field X")
             plt.ylabel("Relative Field Y")
-            plt.colorbar(label="Player Position Frequency")
+            plt.colorbar(label="Normalized Position Density")
             plt.tight_layout()
 
             plt.savefig(
-                os.path.join(self.output_dir, f"team_{team}_heatmap.png")
+                os.path.join(self.output_dir, f"team_{team}_heatmap.png"),
+                dpi=200
             )
-
             plt.close()
 
     def save_all(self, ball_control_history):
