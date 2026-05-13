@@ -726,7 +726,6 @@ def process_chunk(
         print("View transformation failed for this chunk.")
         print(f"Error: {error}")
 
-    # Interpolate short gaps only.
     tracks["ball"] = tracker.interpolate_ball_positions(tracks["ball"])
 
     tracks, team_colors_ready = assign_team_colors_to_players(
@@ -736,10 +735,8 @@ def process_chunk(
         team_colors_ready=team_colors_ready
     )
 
-    # Safety: referees must never be treated like team players.
     tracks = protect_referees_from_team_logic(tracks)
 
-    # Stabilize after team assignment because team helps prevent wrong ID merges.
     tracks = id_stabilizer.stabilize_tracks(
         tracks=tracks,
         frame_offset=frame_offset,
@@ -747,7 +744,6 @@ def process_chunk(
         frame_height=frame_height
     )
 
-    # Safety again after ID stabilization.
     tracks = protect_referees_from_team_logic(tracks)
 
     game_state_per_frame = []
@@ -794,7 +790,8 @@ def process_chunk(
         tracks=tracks,
         frame_offset=frame_offset,
         frame_width=frame_width,
-        frame_height=frame_height
+        frame_height=frame_height,
+        game_state_per_frame=game_state_per_frame
     )
 
     global_team_ball_control = np.array(ball_control_history)
