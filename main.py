@@ -859,8 +859,11 @@ def main():
     if fps == 0:
         fps = 24
 
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    TARGET_WIDTH = 1280
+    TARGET_HEIGHT = 720
+
+    width = TARGET_WIDTH
+    height = TARGET_HEIGHT
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
@@ -936,9 +939,16 @@ def main():
         if not ret:
             break
 
+        # Resize every frame to fixed resolution
+        frame = cv2.resize(
+            frame,
+            (TARGET_WIDTH, TARGET_HEIGHT)
+        )
         chunk_frames.append(frame)
         progress_bar.update(1)
 
+
+        
         if len(chunk_frames) == CHUNK_SIZE:
             print(
                 f"\nProcessing chunk {chunk_number} | "
