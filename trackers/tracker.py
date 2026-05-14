@@ -445,16 +445,20 @@ class Tracker:
                 pickle.dump(tracks, f)
 
         return tracks
-
+    
+    def get_ui_scale(self, frame):
+        h, w = frame.shape[:2]
+        return w / 1920.0    
+    
     def draw_ellipse(self, frame, bbox, color, track_id=None):
         y2 = int(bbox[3])
+
         x_center, _ = get_center_of_bbox(bbox)
         width = get_bbox_width(bbox)
 
-        # === Scale based on player size ===
-        scale = max(0.5, width / 60)
+        # Scale based on frame resolution
+        scale = self.get_ui_scale(frame)
 
-        # Ellipse (cleaner rendering)
         cv2.ellipse(
             frame,
             center=(x_center, y2),
@@ -467,23 +471,29 @@ class Tracker:
             lineType=cv2.LINE_AA
         )
 
-    # === Dynamic label box ===
         rect_w = int(28 * scale)
         rect_h = int(16 * scale)
 
         x1 = int(x_center - rect_w // 2)
         x2 = int(x_center + rect_w // 2)
+
         y1 = int(y2 + 8 * scale)
         y2_rect = int(y1 + rect_h)
 
         if track_id is not None:
-            cv2.rectangle(frame, (x1, y1), (x2, y2_rect), color, cv2.FILLED)
+            cv2.rectangle(
+                frame,
+                (x1, y1),
+                (x2, y2_rect),
+                color,
+                cv2.FILLED
+            )
 
-            # === Centered text ===
-            font_scale = 0.45 * scale
+            font_scale = 0.55 * scale
             thickness = max(1, int(2 * scale))
 
             text = str(track_id)
+
             (tw, th), _ = cv2.getTextSize(
                 text,
                 cv2.FONT_HERSHEY_SIMPLEX,
@@ -509,16 +519,32 @@ class Tracker:
 
     def draw_triangle(self, frame, bbox, color):
         y = int(bbox[1])
+
         x, _ = get_center_of_bbox(bbox)
+
+        scale = self.get_ui_scale(frame)
 
         triangle_points = np.array([
             [x, y],
-            [x - 10, y - 20],
-            [x + 10, y - 20],
+            [x - int(10 * scale), y - int(20 * scale)],
+            [x + int(10 * scale), y - int(20 * scale)],
         ])
 
-        cv2.drawContours(frame, [triangle_points], 0, color, cv2.FILLED)
-        cv2.drawContours(frame, [triangle_points], 0, (0, 0, 0), 2)
+        cv2.drawContours(
+            frame,
+            [triangle_points],
+            0,
+            color,
+            cv2.FILLED
+        )
+
+        cv2.drawContours(
+            frame,
+            [triangle_points],
+            0,
+            (0, 0, 0),
+            max(1, int(2 * scale))
+        )
 
         return frame
 
@@ -527,20 +553,38 @@ class Tracker:
 
     def draw_ball_marker(self, frame, bbox, color=(0, 255, 0)):
         cx, cy = get_center_of_bbox(bbox)
-        x1, y1, x2, y2 = bbox
-        size = max(6, int(max(x2 - x1, y2 - y1) * 0.7))
 
-        cv2.circle(frame, (int(cx), int(cy)), size, color, 2)
-        cv2.circle(frame, (int(cx), int(cy)), 2, color, -1)
+        scale = self.get_ui_scale(frame)
+
+        size = max(4, int(8 * scale))
+
+        cv2.circle(
+            frame,
+            (int(cx), int(cy)),
+            size,
+            color,
+            2,
+            cv2.LINE_AA
+        )
+
+        cv2.circle(
+            frame,
+            (int(cx), int(cy)),
+            2,
+            color,
+            -1
+        )
 
         return frame
 
     def draw_team_ball_control(self, frame, global_frame_num, team_ball_control):
         overlay = frame.copy()
+
         height, width = frame.shape[:2]
 
         x1 = int(width * 0.74)
         y1 = int(height * 0.82)
+
         x2 = int(width * 0.98)
         y2 = int(height * 0.95)
 
@@ -552,7 +596,14 @@ class Tracker:
             -1
         )
 
-        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+        cv2.addWeighted(
+            overlay,
+            0.35,
+            frame,
+            0.65,
+            0,
+            frame
+        )
 
         if len(team_ball_control) == 0:
             team_1 = 0
@@ -577,12 +628,14 @@ class Tracker:
                 team_1 = team_1_num_frames / total_frames
                 team_2 = team_2_num_frames / total_frames
 
+        font_scale = 0.55 * self.get_ui_scale(frame)
+
         cv2.putText(
             frame,
             f"Team 1 Ball Control: {team_1 * 100:.2f}%",
             (x1 + 12, y1 + 28),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            font_scale,
             (0, 0, 0),
             2,
             cv2.LINE_AA
@@ -593,7 +646,7 @@ class Tracker:
             f"Team 2 Ball Control: {team_2 * 100:.2f}%",
             (x1 + 12, y1 + 58),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
+            font_scale,
             (0, 0, 0),
             2,
             cv2.LINE_AA
