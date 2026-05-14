@@ -56,7 +56,7 @@ class Tracker:
         self.max_ball_interpolation_gap = 8
         self.max_ball_box_width_ratio = 0.12
         self.max_ball_box_height_ratio = 0.12
-        self.max_ball_jump_ratio = 0.16
+        self.max_ball_jump_ratio = 0.35
 
         # Play-area margins
         self.play_area_left_ratio = 0.01
@@ -222,7 +222,20 @@ class Tracker:
 
         max_allowed_jump = frame_diag * self.max_ball_jump_ratio
 
-        return distance <= max_allowed_jump
+        if distance <= max_allowed_jump:
+            return True
+
+        # Allow larger jumps for aerial balls
+        current_height = current_bbox[3] - current_bbox[1]
+        previous_height = previous_bbox[3] - previous_bbox[1]
+
+        height_ratio = current_height / max(previous_height, 1)
+
+        # Ball appears smaller in air
+        if height_ratio < 0.7:
+            return distance <= max_allowed_jump * 2.0
+
+        return False
 
     def get_ball_bbox_from_ball_model(self, detection, frame):
         if detection is None or detection.boxes is None:
