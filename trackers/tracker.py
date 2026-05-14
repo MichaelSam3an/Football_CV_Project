@@ -43,10 +43,15 @@ class Tracker:
                 )
             self.ball_model = YOLO(ball_model_path)
 
-        self.tracker = sv.ByteTrack()
+        self.tracker = sv.ByteTrack(
+            track_activation_threshold=0.20,
+            lost_track_buffer=120,
+            minimum_matching_threshold=0.65,
+            frame_rate=25
+         )
 
         # Detection settings
-        self.main_conf = 0.08
+        self.main_conf = 0.15
         self.main_imgsz = 960
 
         self.ball_conf = 0.18
