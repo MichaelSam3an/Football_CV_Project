@@ -1,62 +1,67 @@
-import sys 
+import sys
 sys.path.append('../')
+
 from utils import get_center_of_bbox, measure_distance
 
+
 class PlayerBallAssigner():
+
     def __init__(self):
         self.max_player_ball_distance = 70
-    
-def assign_ball_to_player(self, players, ball_bbox):
-    ball_position = get_center_of_bbox(ball_bbox)
 
-    minimum_distance = 99999
-    assigned_player = -1
+    def assign_ball_to_player(self, players, ball_bbox):
 
-    ball_x, ball_y = ball_position
+        ball_position = get_center_of_bbox(ball_bbox)
 
-    for player_id, player in players.items():
-        player_bbox = player['bbox']
+        minimum_distance = 99999
+        assigned_player = -1
 
-        x1, y1, x2, y2 = player_bbox
+        ball_x, ball_y = ball_position
 
-        # =========================
-        # FULL BODY POSSESSION ZONE
-        # =========================
+        for player_id, player in players.items():
 
-        padding_x = 25
-        padding_y = 40
+            player_bbox = player['bbox']
 
-        inside_player_zone = (
-            ball_x >= x1 - padding_x and
-            ball_x <= x2 + padding_x and
-            ball_y >= y1 - padding_y and
-            ball_y <= y2 + padding_y
-        )
+            x1, y1, x2, y2 = player_bbox
 
-        # =========================
-        # FOOT DISTANCE (fallback)
-        # =========================
+            # ==================================
+            # FULL BODY POSSESSION ZONE
+            # ==================================
 
-        distance_left = measure_distance(
-            (x1, y2),
-            ball_position
-        )
+            padding_x = 25
+            padding_y = 40
 
-        distance_right = measure_distance(
-            (x2, y2),
-            ball_position
-        )
+            inside_player_zone = (
+                ball_x >= x1 - padding_x and
+                ball_x <= x2 + padding_x and
+                ball_y >= y1 - padding_y and
+                ball_y <= y2 + padding_y
+            )
 
-        distance = min(distance_left, distance_right)
+            # ==================================
+            # FOOT DISTANCE (fallback)
+            # ==================================
 
-        # =========================
-        # COMBINED LOGIC
-        # =========================
+            distance_left = measure_distance(
+                (x1, y2),
+                ball_position
+            )
 
-        if inside_player_zone or distance < self.max_player_ball_distance:
+            distance_right = measure_distance(
+                (x2, y2),
+                ball_position
+            )
 
-            if distance < minimum_distance:
-                minimum_distance = distance
-                assigned_player = player_id
+            distance = min(distance_left, distance_right)
 
-    return assigned_player
+            # ==================================
+            # COMBINED LOGIC
+            # ==================================
+
+            if inside_player_zone or distance < self.max_player_ball_distance:
+
+                if distance < minimum_distance:
+                    minimum_distance = distance
+                    assigned_player = player_id
+
+        return assigned_player
