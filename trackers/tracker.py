@@ -337,8 +337,6 @@ class Tracker:
                     combined_score -= normalized_distance * 2.0
             
                 
-                # Penalize huge jumps
-                combined_score -= normalized_distance * 2.0
 
             # =====================================
             # SIZE CONSISTENCY
