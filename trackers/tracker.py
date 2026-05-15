@@ -321,8 +321,9 @@ class Tracker:
 
             # Reject absurd detections
             if bbox_area > 5000:
-                aspect_ratio = bbox_width / max(bbox_height, 1)
-                if aspect_ratio > 2.0 or aspect_ratio < 0.5:
+                continue
+            aspect_ratio = bbox_width / max(bbox_height, 1)
+            if aspect_ratio > 2.0 or aspect_ratio < 0.5:
                 continue
 
             # Prefer realistic football sizes
