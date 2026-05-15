@@ -246,8 +246,8 @@ class Tracker:
 
     def get_ball_bbox_from_ball_model(self, detection, frame):
 
-    if detection is None or detection.boxes is None:
-        return None
+        if detection is None or detection.boxes is None:
+            return None
 
     best_bbox = None
     best_score = -999999
