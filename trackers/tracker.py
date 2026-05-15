@@ -78,7 +78,7 @@ class Tracker:
         # Ball tracking memory
         self.previous_ball_bbox = None
         self.ball_missing_frames = 0
-        self.max_ball_missing_frames = 12
+        self.max_ball_missing_frames = 25
 
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
@@ -315,7 +315,28 @@ class Tracker:
                 ) ** 0.5
 
                 normalized_distance = distance / frame_diag
+                previous_height = (
+                    previous_ball_bbox[3] -
+                    previous_ball_bbox[1]
+                )
 
+                current_height = (
+                    bbox[3] -
+                    bbox[1]
+                )
+
+                # Tiny ball -> likely aerial
+                is_aerial_ball = (
+                    previous_height < 18 and
+                    current_height < 18
+                )
+
+                if is_aerial_ball:
+                    combined_score -= normalized_distance * 0.8
+                else:
+                    combined_score -= normalized_distance * 2.0
+            
+                
                 # Penalize huge jumps
                 combined_score -= normalized_distance * 2.0
 
@@ -355,7 +376,20 @@ class Tracker:
         # =====================================
 
         MIN_ACCEPTABLE_SCORE = 0.45
+        # Lower threshold for aerial balls
+        if previous_ball_bbox is not None:
 
+            previous_height = (
+                previous_ball_bbox[3] -
+                previous_ball_bbox[1]
+            )
+
+            # Tiny previous ball -> likely aerial
+            if previous_height < 18:
+                MIN_ACCEPTABLE_SCORE = 0.28
+
+
+        
         if best_score < MIN_ACCEPTABLE_SCORE:
 
             self.ball_missing_frames += 1
