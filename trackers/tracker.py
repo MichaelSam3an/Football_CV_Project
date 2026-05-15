@@ -75,6 +75,11 @@ class Tracker:
         self.play_area_top_ratio = 0.03
         self.play_area_bottom_ratio = 0.98
 
+        # Ball tracking memory
+        self.previous_ball_bbox = None
+        self.ball_missing_frames = 0
+        self.max_ball_missing_frames = 12
+
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
             if object_name not in ["players", "referees", "ball"]:
