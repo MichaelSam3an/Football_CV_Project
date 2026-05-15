@@ -167,13 +167,13 @@ class PlayerIDStabilizer:
                 )
             
             
-                score = (
-                    distance_score * 2.0
-                    + iou_score * 3.0
-                    + age_score * 0.5
-                    + team_score
-                    + appearance_score * 2.5
-                )
+            score = (
+                distance_score * 2.0
+                + iou_score * 3.0
+                + age_score * 0.5
+                + team_score
+                + appearance_score * 2.5
+            )
 
             if score > best_score:
                 best_score = score
