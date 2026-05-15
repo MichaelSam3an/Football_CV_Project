@@ -246,141 +246,154 @@ class Tracker:
 
     def get_ball_bbox_from_ball_model(self, detection, frame):
 
-        if detection is None or detection.boxes is None:
-            return None
+    if detection is None or detection.boxes is None:
+        return None
 
-        best_bbox = None
-        best_score = -999999
+    best_bbox = None
+    best_score = -999999
 
-        previous_ball_bbox = getattr(
-            self,
-            "previous_ball_bbox",
-            None
-        )
-    
-        for box in detection.boxes:
+    previous_ball_bbox = getattr(
+        self,
+        "previous_ball_bbox",
+        None
+    )
 
-            score = float(box.conf[0])
-            bbox = box.xyxy[0].tolist()
+    for box in detection.boxes:
 
-            # =====================================
-            # BASIC FILTERS
-            # =====================================
-    
-            if not self.is_reasonable_ball_size(
-                bbox,
-                frame.shape
-            ):
-                continue
-
-            if not self.is_inside_play_area(
-                bbox,
-                frame.shape
-            ):
-                continue
-
-            combined_score = score
-
-            # =====================================
-            # DISTANCE CONSISTENCY
-            # =====================================
-
-            if previous_ball_bbox is not None:
-
-                previous_center = get_center_of_bbox(
-                    previous_ball_bbox
-                )
-
-                current_center = get_center_of_bbox(
-                    bbox
-                )
-
-                distance = np.linalg.norm(
-                    np.array(current_center) -
-                    np.array(previous_center)
-                )
-
-                frame_diag = (
-                    frame.shape[0] ** 2 +
-                    frame.shape[1] ** 2
-                ) ** 0.5
-
-                normalized_distance = distance / frame_diag
-
-                # Penalize huge jumps
-                combined_score -= normalized_distance * 3.5
-
-            # =====================================
-            # SIZE CONSISTENCY
-            # =====================================
-
-            bbox_width = bbox[2] - bbox[0]
-            bbox_height = bbox[3] - bbox[1]
-
-            bbox_area = bbox_width * bbox_height
-
-            # Reject absurd detections
-            if bbox_area > 5000:
-                continue
-            aspect_ratio = bbox_width / max(bbox_height, 1)
-            if aspect_ratio > 2.0 or aspect_ratio < 0.5:
-                continue
-
-            # Prefer realistic football sizes
-            if 20 < bbox_area < 1200:
-                combined_score += 0.2
-
-            # =====================================
-            # BEST DETECTION
-            # =====================================
-
-            if combined_score > best_score:
-                best_score = combined_score
-                best_bbox = bbox
+        score = float(box.conf[0])
+        bbox = box.xyxy[0].tolist()
 
         # =====================================
-        # STORE PREVIOUS BALL
+        # BASIC FILTERS
         # =====================================
 
-        if best_bbox is not None:
-            if self.previous_ball_bbox is not None:
-                 previous_center = get_center_of_bbox(
-                        self.previous_ball_bbox
-                )
-                 current_center = get_center_of_bbox(
-                    best_bbox
-                )
-                distance = np.linalg.norm(
-                    np.array(current_center) -
-                    np.array(previous_center)
-                )
-                frame_diag = (
-                    frame.shape[0] ** 2 +
-                    frame.shape[1] ** 2
-                ) ** 0.5
-                normalized_distance = distance / frame_diag
-                if normalized_distance > 0.20:
-                    if self.ball_switch_candidate is None:
-                        self.ball_switch_candidate = best_bbox
-                        self.ball_switch_frames = 1
-                    else:
-                        self.ball_switch_frames += 1
+        if not self.is_reasonable_ball_size(
+            bbox,
+            frame.shape
+        ):
+            continue
 
-                    if self.ball_switch_frames >= 3:
-                        self.previous_ball_bbox = best_bbox
-                        self.ball_switch_candidate = None
-                        self.ball_switch_frames = 0
+        if not self.is_inside_play_area(
+            bbox,
+            frame.shape
+        ):
+            continue
 
-                 else:
+        combined_score = score
+
+        # =====================================
+        # DISTANCE CONSISTENCY
+        # =====================================
+
+        if previous_ball_bbox is not None:
+
+            previous_center = get_center_of_bbox(
+                previous_ball_bbox
+            )
+
+            current_center = get_center_of_bbox(
+                bbox
+            )
+
+            distance = np.linalg.norm(
+                np.array(current_center) -
+                np.array(previous_center)
+            )
+
+            frame_diag = (
+                frame.shape[0] ** 2 +
+                frame.shape[1] ** 2
+            ) ** 0.5
+
+            normalized_distance = distance / frame_diag
+
+            # Strongly penalize huge jumps
+            combined_score -= normalized_distance * 3.5
+
+        # =====================================
+        # SIZE CONSISTENCY
+        # =====================================
+
+        bbox_width = bbox[2] - bbox[0]
+        bbox_height = bbox[3] - bbox[1]
+
+        bbox_area = bbox_width * bbox_height
+
+        # Reject absurd detections
+        if bbox_area > 5000:
+            continue
+
+        # Reject weird aspect ratios
+        aspect_ratio = bbox_width / max(bbox_height, 1)
+
+        if aspect_ratio > 2.0 or aspect_ratio < 0.5:
+            continue
+
+        # Prefer realistic football sizes
+        if 20 < bbox_area < 1200:
+            combined_score += 0.2
+
+        # =====================================
+        # BEST DETECTION
+        # =====================================
+
+        if combined_score > best_score:
+            best_score = combined_score
+            best_bbox = bbox
+
+    # =====================================
+    # STORE PREVIOUS BALL
+    # =====================================
+
+    if best_bbox is not None:
+
+        if previous_ball_bbox is not None:
+
+            previous_center = get_center_of_bbox(
+                previous_ball_bbox
+            )
+
+            current_center = get_center_of_bbox(
+                best_bbox
+            )
+
+            distance = np.linalg.norm(
+                np.array(current_center) -
+                np.array(previous_center)
+            )
+
+            frame_diag = (
+                frame.shape[0] ** 2 +
+                frame.shape[1] ** 2
+            ) ** 0.5
+
+            normalized_distance = distance / frame_diag
+
+            # Huge sudden jump → suspicious
+            if normalized_distance > 0.20:
+
+                if self.ball_switch_candidate is None:
+                    self.ball_switch_candidate = best_bbox
+                    self.ball_switch_frames = 1
+
+                else:
+                    self.ball_switch_frames += 1
+
+                # Only allow switch after confirmation
+                if self.ball_switch_frames >= 3:
                     self.previous_ball_bbox = best_bbox
                     self.ball_switch_candidate = None
                     self.ball_switch_frames = 0
 
-         else:
+            else:
+                self.previous_ball_bbox = best_bbox
+                self.ball_switch_candidate = None
+                self.ball_switch_frames = 0
+
+        else:
             self.previous_ball_bbox = best_bbox
 
-        return best_bbox
-
+    return best_bbox
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
             return None
