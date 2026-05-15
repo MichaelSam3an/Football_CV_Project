@@ -49,6 +49,10 @@ class Tracker:
             minimum_matching_threshold=0.65,
             frame_rate=25
          )
+
+        self.previous_ball_bbox = None
+        self.ball_missing_frames = 0
+        self.max_ball_missing_frames = 12
         
         self.ball_switch_candidate = None
         self.ball_switch_frames = 0
@@ -348,6 +352,16 @@ class Tracker:
         MIN_ACCEPTABLE_SCORE = 0.45
 
         if best_score < MIN_ACCEPTABLE_SCORE:
+
+            self.ball_missing_frames += 1
+
+            # Keep previous ball briefly
+            if (
+                self.previous_ball_bbox is not None and
+                self.ball_missing_frames <= self.max_ball_missing_frames
+            ):
+                return self.previous_ball_bbox
+            
             return None
 
         # =====================================
@@ -356,7 +370,7 @@ class Tracker:
 
         if best_bbox is not None:
             self.previous_ball_bbox = best_bbox
-
+            self.ball_missing_frames = 0
         return best_bbox
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
