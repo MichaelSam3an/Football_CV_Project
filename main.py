@@ -161,19 +161,19 @@ class PlayerIDStabilizer:
                 np.array(previous_color)
                 )
 
-            appearance_score = max(
-                0.0,
-                1.0 - (color_distance / 255.0)
-            )
+                appearance_score = max(
+                    0.0,
+                    1.0 - (color_distance / 255.0)
+                )
             
             
-            score = (
-                distance_score * 2.0
-                + iou_score * 3.0
-                + age_score * 0.5
-                + team_score
-                + appearance_score * 2.5
-            )
+                score = (
+                    distance_score * 2.0
+                    + iou_score * 3.0
+                    + age_score * 0.5
+                    + team_score
+                    + appearance_score * 2.5
+                )
 
             if score > best_score:
                 best_score = score
