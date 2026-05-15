@@ -49,12 +49,14 @@ class Tracker:
             minimum_matching_threshold=0.65,
             frame_rate=25
          )
-
+        
+        self.ball_switch_candidate = None
+        self.ball_switch_frames = 0
         # Detection settings
         self.main_conf = 0.15
         self.main_imgsz = 960
 
-        self.ball_conf = 0.18
+        self.ball_conf = 0.10
         self.ball_imgsz = 960
 
         # Ball filtering settings
@@ -306,7 +308,7 @@ class Tracker:
                 normalized_distance = distance / frame_diag
 
                 # Penalize huge jumps
-                combined_score -= normalized_distance * 0.8
+                combined_score -= normalized_distance * 3.5
 
             # =====================================
             # SIZE CONSISTENCY
@@ -319,6 +321,8 @@ class Tracker:
 
             # Reject absurd detections
             if bbox_area > 5000:
+                aspect_ratio = bbox_width / max(bbox_height, 1)
+                if aspect_ratio > 2.0 or aspect_ratio < 0.5:
                 continue
 
             # Prefer realistic football sizes
@@ -338,6 +342,40 @@ class Tracker:
         # =====================================
 
         if best_bbox is not None:
+            if self.previous_ball_bbox is not None:
+                 previous_center = get_center_of_bbox(
+                        self.previous_ball_bbox
+                )
+                 current_center = get_center_of_bbox(
+                    best_bbox
+                )
+                distance = np.linalg.norm(
+                    np.array(current_center) -
+                    np.array(previous_center)
+                )
+                frame_diag = (
+                    frame.shape[0] ** 2 +
+                    frame.shape[1] ** 2
+                ) ** 0.5
+                normalized_distance = distance / frame_diag
+                if normalized_distance > 0.20:
+                    if self.ball_switch_candidate is None:
+                        self.ball_switch_candidate = best_bbox
+                        self.ball_switch_frames = 1
+                    else:
+                        self.ball_switch_frames += 1
+
+                    if self.ball_switch_frames >= 3:
+                        self.previous_ball_bbox = best_bbox
+                        self.ball_switch_candidate = None
+                        self.ball_switch_frames = 0
+
+                 else:
+                    self.previous_ball_bbox = best_bbox
+                    self.ball_switch_candidate = None
+                    self.ball_switch_frames = 0
+
+         else:
             self.previous_ball_bbox = best_bbox
 
         return best_bbox
