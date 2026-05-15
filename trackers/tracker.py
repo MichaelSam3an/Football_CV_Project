@@ -243,25 +243,102 @@ class Tracker:
         return False
 
     def get_ball_bbox_from_ball_model(self, detection, frame):
+
         if detection is None or detection.boxes is None:
             return None
 
         best_bbox = None
-        best_score = 0
+        best_score = -999999
 
+        previous_ball_bbox = getattr(
+            self,
+            "previous_ball_bbox",
+            None
+        )
+    
         for box in detection.boxes:
+
             score = float(box.conf[0])
             bbox = box.xyxy[0].tolist()
 
-            if not self.is_reasonable_ball_size(bbox, frame.shape):
+            # =====================================
+            # BASIC FILTERS
+            # =====================================
+    
+            if not self.is_reasonable_ball_size(
+                bbox,
+                frame.shape
+            ):
                 continue
 
-            if not self.is_inside_play_area(bbox, frame.shape):
+            if not self.is_inside_play_area(
+                bbox,
+                frame.shape
+            ):
                 continue
 
-            if score > best_score:
-                best_score = score
+            combined_score = score
+
+            # =====================================
+            # DISTANCE CONSISTENCY
+            # =====================================
+
+            if previous_ball_bbox is not None:
+
+                previous_center = get_center_of_bbox(
+                    previous_ball_bbox
+                )
+
+                current_center = get_center_of_bbox(
+                    bbox
+                )
+
+                distance = np.linalg.norm(
+                    np.array(current_center) -
+                    np.array(previous_center)
+                )
+
+                frame_diag = (
+                    frame.shape[0] ** 2 +
+                    frame.shape[1] ** 2
+                ) ** 0.5
+
+                normalized_distance = distance / frame_diag
+
+                # Penalize huge jumps
+                combined_score -= normalized_distance * 0.8
+
+            # =====================================
+            # SIZE CONSISTENCY
+            # =====================================
+
+            bbox_width = bbox[2] - bbox[0]
+            bbox_height = bbox[3] - bbox[1]
+
+            bbox_area = bbox_width * bbox_height
+
+            # Reject absurd detections
+            if bbox_area > 5000:
+                continue
+
+            # Prefer realistic football sizes
+            if 20 < bbox_area < 1200:
+                combined_score += 0.2
+
+            # =====================================
+            # BEST DETECTION
+            # =====================================
+
+            if combined_score > best_score:
+                best_score = combined_score
                 best_bbox = bbox
+
+        # =====================================
+        # STORE PREVIOUS BALL
+        # =====================================
+
+        if best_bbox is not None:
+            self.previous_ball_bbox = best_bbox
 
         return best_bbox
 
