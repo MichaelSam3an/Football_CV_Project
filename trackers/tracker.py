@@ -56,7 +56,7 @@ class Tracker:
         self.main_conf = 0.15
         self.main_imgsz = 960
 
-        self.ball_conf = 0.10
+        self.ball_conf = 0.22
         self.ball_imgsz = 960
 
         # Ball filtering settings
@@ -307,8 +307,8 @@ class Tracker:
 
                 normalized_distance = distance / frame_diag
 
-                # Strongly penalize huge jumps
-                combined_score -= normalized_distance * 3.5
+                # Penalize huge jumps
+                combined_score -= normalized_distance * 2.0
 
             # =====================================
             # SIZE CONSISTENCY
@@ -342,56 +342,20 @@ class Tracker:
                 best_bbox = bbox
 
         # =====================================
+        # CONFIDENCE GATE
+        # =====================================
+
+        MIN_ACCEPTABLE_SCORE = 0.45
+
+        if best_score < MIN_ACCEPTABLE_SCORE:
+            return None
+
+        # =====================================
         # STORE PREVIOUS BALL
         # =====================================
 
         if best_bbox is not None:
-
-            if previous_ball_bbox is not None:
-
-                previous_center = get_center_of_bbox(
-                    previous_ball_bbox
-                )
-
-                current_center = get_center_of_bbox(
-                    best_bbox
-                )
-
-                distance = np.linalg.norm(
-                    np.array(current_center) -
-                    np.array(previous_center)
-                )
-
-                frame_diag = (
-                    frame.shape[0] ** 2 +
-                    frame.shape[1] ** 2
-                ) ** 0.5
-
-                normalized_distance = distance / frame_diag
-
-                # Huge sudden jump → suspicious
-                if normalized_distance > 0.20:
-
-                    if self.ball_switch_candidate is None:
-                        self.ball_switch_candidate = best_bbox
-                        self.ball_switch_frames = 1
-
-                    else:
-                        self.ball_switch_frames += 1
-
-                    # Only allow switch after confirmation
-                    if self.ball_switch_frames >= 3:
-                        self.previous_ball_bbox = best_bbox
-                        self.ball_switch_candidate = None
-                        self.ball_switch_frames = 0
-
-                else:
-                    self.previous_ball_bbox = best_bbox
-                    self.ball_switch_candidate = None
-                    self.ball_switch_frames = 0
-
-            else:
-                self.previous_ball_bbox = best_bbox
+            self.previous_ball_bbox = best_bbox
 
         return best_bbox
     
