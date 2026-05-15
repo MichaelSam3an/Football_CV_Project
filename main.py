@@ -149,11 +149,30 @@ class PlayerIDStabilizer:
                 if current_team == previous_team:
                     team_score = 0.5
 
+            appearance_score = 0.0
+
+            current_color = local_track.get("team_color", None)
+            previous_color = memory.get("team_color", None)
+
+            if current_color is not None and previous_color is not None:
+
+                color_distance = np.linalg.norm(
+                np.array(current_color) -
+                np.array(previous_color)
+                )
+
+            appearance_score = max(
+                0.0,
+                1.0 - (color_distance / 255.0)
+            )
+            
+            
             score = (
                 distance_score * 2.0
                 + iou_score * 3.0
                 + age_score * 0.5
                 + team_score
+                + appearance_score * 2.5
             )
 
             if score > best_score:
@@ -235,6 +254,7 @@ class PlayerIDStabilizer:
                 self.global_memory[object_name][global_id] = {
                     "bbox": track_info["bbox"],
                     "team": track_info.get("team", None),
+                    "team_color": track_info.get("team_color", None),
                     "last_seen": global_frame_num
                 }
 
