@@ -70,10 +70,10 @@ class Tracker:
         self.max_ball_jump_ratio = 0.35
 
         # Play-area margins
-        self.play_area_left_ratio = 0.01
-        self.play_area_right_ratio = 0.99
-        self.play_area_top_ratio = 0.03
-        self.play_area_bottom_ratio = 0.98
+        self.play_area_left_ratio = -0.08
+        self.play_area_right_ratio = 1.08
+        self.play_area_top_ratio = -0.12
+        self.play_area_bottom_ratio = 1.03
 
         # Ball tracking memory
         self.previous_ball_bbox = None
@@ -303,7 +303,16 @@ class Tracker:
                 current_center = get_center_of_bbox(
                     bbox
                 )
+                cx, cy = current_center
+                frame_h, frame_w = frame.shape[:2]
+                near_border = (
+                    cx < frame_w * 0.12 or
+                    cx > frame_w * 0.88 or
+                    cy < frame_h * 0.12 or
+                    cy > frame_h * 0.88
+                )
 
+                
                 distance = np.linalg.norm(
                     np.array(current_center) -
                     np.array(previous_center)
