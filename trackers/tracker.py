@@ -88,7 +88,10 @@ class Tracker:
         self.previous_ball_bbox = None
         self.ball_missing_frames = 0
         self.max_ball_missing_frames = 25
-        
+
+
+        self.ball_search_padding = 220
+        self.ball_zoom_scale = 2.0
 
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
@@ -174,77 +177,139 @@ class Tracker:
         return ball_detections
 
 
-    def get_ball_bbox_from_sahi(self, frame):
+   def get_ball_bbox_from_sahi(self, frame):
 
-        result = get_sliced_prediction(
-            frame,
-            self.sahi_ball_model,
-            slice_height=320,
-            slice_width=320,
-            overlap_height_ratio=0.2,
-            overlap_width_ratio=0.2,
-            verbose=0
-        )
-    
-        best_bbox = None
-        best_score = -999999
+    frame_h, frame_w = frame.shape[:2]
 
-        previous_ball_bbox = getattr(
-            self,
-            "previous_ball_bbox",
-            None
-        )
+    # =====================================
+    # USE PREVIOUS BALL LOCATION
+    # =====================================
 
-        for prediction in result.object_prediction_list:
+    if self.previous_ball_bbox is not None:
 
-            score = prediction.score.value
+        px1, py1, px2, py2 = self.previous_ball_bbox
 
-            bbox = prediction.bbox.to_xyxy()
+        cx = int((px1 + px2) / 2)
+        cy = int((py1 + py2) / 2)
 
-            bbox = [
-                bbox[0],
-                bbox[1],
-                bbox[2],
-                bbox[3]
-            ]
+        padding = self.ball_search_padding
 
-            if not self.is_reasonable_ball_size(
-                bbox,
-                frame.shape
-            ):
-                continue
+        crop_x1 = max(0, cx - padding)
+        crop_y1 = max(0, cy - padding)
 
-            combined_score = score
+        crop_x2 = min(frame_w, cx + padding)
+        crop_y2 = min(frame_h, cy + padding)
 
-            if previous_ball_bbox is not None:
+        cropped_frame = frame[
+            crop_y1:crop_y2,
+            crop_x1:crop_x2
+        ]
 
-                previous_center = get_center_of_bbox(
-                    previous_ball_bbox
-                )
+    else:
 
-                current_center = get_center_of_bbox(
-                    bbox
-                )
+        # fallback to full frame
+        crop_x1 = 0
+        crop_y1 = 0
 
-                distance = np.linalg.norm(
-                    np.array(current_center) -
-                    np.array(previous_center)
-                )
+        cropped_frame = frame
 
-                frame_diag = (
-                    frame.shape[0] ** 2 +
-                    frame.shape[1] ** 2
-                ) ** 0.5
+    # =====================================
+    # UPSCALE REGION
+    # =====================================
 
-                normalized_distance = distance / frame_diag
+    zoomed_frame = cv2.resize(
+        cropped_frame,
+        None,
+        fx=self.ball_zoom_scale,
+        fy=self.ball_zoom_scale,
+        interpolation=cv2.INTER_CUBIC
+    )
 
-                combined_score -= normalized_distance * 1.0
+    # =====================================
+    # SAHI INFERENCE
+    # =====================================
 
-            if combined_score > best_score:
-                best_score = combined_score
-                best_bbox = bbox
+    result = get_sliced_prediction(
+        zoomed_frame,
+        self.sahi_ball_model,
+        slice_height=320,
+        slice_width=320,
+        overlap_height_ratio=0.2,
+        overlap_width_ratio=0.2,
+        verbose=0
+    )
 
-        return best_bbox
+    best_bbox = None
+    best_score = -999999
+
+    previous_ball_bbox = getattr(
+        self,
+        "previous_ball_bbox",
+        None
+    )
+
+    for prediction in result.object_prediction_list:
+
+        score = prediction.score.value
+
+        bbox = prediction.bbox.to_xyxy()
+
+        # =====================================
+        # MAP BACK TO ORIGINAL FRAME
+        # =====================================
+
+        bbox = [
+            bbox[0] / self.ball_zoom_scale + crop_x1,
+            bbox[1] / self.ball_zoom_scale + crop_y1,
+            bbox[2] / self.ball_zoom_scale + crop_x1,
+            bbox[3] / self.ball_zoom_scale + crop_y1,
+        ]
+
+        # =====================================
+        # BASIC FILTERS
+        # =====================================
+
+        if not self.is_reasonable_ball_size(
+            bbox,
+            frame.shape
+        ):
+            continue
+
+        combined_score = score
+
+        # =====================================
+        # CONTINUITY
+        # =====================================
+
+        if previous_ball_bbox is not None:
+
+            previous_center = get_center_of_bbox(
+                previous_ball_bbox
+            )
+
+            current_center = get_center_of_bbox(
+                bbox
+            )
+
+            distance = np.linalg.norm(
+                np.array(current_center) -
+                np.array(previous_center)
+            )
+
+            frame_diag = (
+                frame.shape[0] ** 2 +
+                frame.shape[1] ** 2
+            ) ** 0.5
+
+            normalized_distance = distance / frame_diag
+
+            combined_score -= normalized_distance * 0.8
+
+        if combined_score > best_score:
+            best_score = combined_score
+            best_bbox = bbox
+
+    return best_bbox
 
     
     def bbox_iou(self, box_a, box_b):
