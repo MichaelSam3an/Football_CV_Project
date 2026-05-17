@@ -310,7 +310,7 @@ class Tracker:
             best_bbox = bbox
 
         
-        return best_bbox
+    return best_bbox
 
     
     def bbox_iou(self, box_a, box_b):
