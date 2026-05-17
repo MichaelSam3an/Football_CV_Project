@@ -540,7 +540,7 @@ class Tracker:
                 best_score = score
                 best_bbox = bbox
 
-    return best_bbox
+        return best_bbox
 
     def get_previous_ball_bbox(self, tracks, frame_num, lookback=8):
         start = max(0, frame_num - lookback)
