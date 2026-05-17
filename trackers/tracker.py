@@ -177,140 +177,140 @@ class Tracker:
         return ball_detections
 
 
-   def get_ball_bbox_from_sahi(self, frame):
+    def get_ball_bbox_from_sahi(self, frame):
 
-    frame_h, frame_w = frame.shape[:2]
+     frame_h, frame_w = frame.shape[:2]
 
-    # =====================================
-    # USE PREVIOUS BALL LOCATION
-    # =====================================
+     # =====================================
+     # USE PREVIOUS BALL LOCATION
+     # =====================================
 
-    if self.previous_ball_bbox is not None:
+     if self.previous_ball_bbox is not None:
 
-        px1, py1, px2, py2 = self.previous_ball_bbox
+         px1, py1, px2, py2 = self.previous_ball_bbox
 
-        cx = int((px1 + px2) / 2)
-        cy = int((py1 + py2) / 2)
+         cx = int((px1 + px2) / 2)
+         cy = int((py1 + py2) / 2)
 
-        padding = self.ball_search_padding
+         padding = self.ball_search_padding
 
-        crop_x1 = max(0, cx - padding)
-        crop_y1 = max(0, cy - padding)
+         crop_x1 = max(0, cx - padding)
+         crop_y1 = max(0, cy - padding)
 
-        crop_x2 = min(frame_w, cx + padding)
-        crop_y2 = min(frame_h, cy + padding)
+         crop_x2 = min(frame_w, cx + padding)
+         crop_y2 = min(frame_h, cy + padding)
 
-        cropped_frame = frame[
-            crop_y1:crop_y2,
-            crop_x1:crop_x2
-        ]
+         cropped_frame = frame[
+             crop_y1:crop_y2,
+             crop_x1:crop_x2
+         ]
 
-    else:
+     else:
+ 
+         # fallback to full frame
+         crop_x1 = 0
+         crop_y1 = 0
 
-        # fallback to full frame
-        crop_x1 = 0
-        crop_y1 = 0
+         cropped_frame = frame
 
-        cropped_frame = frame
+     # =====================================
+     # UPSCALE REGION
+     # =====================================
+ 
+     zoomed_frame = cv2.resize(
+         cropped_frame,
+         None,
+         fx=self.ball_zoom_scale,
+         fy=self.ball_zoom_scale,
+         interpolation=cv2.INTER_CUBIC
+     )
 
-    # =====================================
-    # UPSCALE REGION
-    # =====================================
+     # =====================================
+     # SAHI INFERENCE
+     # =====================================
 
-    zoomed_frame = cv2.resize(
-        cropped_frame,
-        None,
-        fx=self.ball_zoom_scale,
-        fy=self.ball_zoom_scale,
-        interpolation=cv2.INTER_CUBIC
-    )
+     result = get_sliced_prediction(
+         zoomed_frame,
+         self.sahi_ball_model,
+         slice_height=320,
+         slice_width=320,
+         overlap_height_ratio=0.2,
+         overlap_width_ratio=0.2,
+         verbose=0
+     )
 
-    # =====================================
-    # SAHI INFERENCE
-    # =====================================
+     best_bbox = None
+     best_score = -999999
 
-    result = get_sliced_prediction(
-        zoomed_frame,
-        self.sahi_ball_model,
-        slice_height=320,
-        slice_width=320,
-        overlap_height_ratio=0.2,
-        overlap_width_ratio=0.2,
-        verbose=0
-    )
+     previous_ball_bbox = getattr(
+         self,
+         "previous_ball_bbox",
+         None
+     )
 
-    best_bbox = None
-    best_score = -999999
+     for prediction in result.object_prediction_list:
 
-    previous_ball_bbox = getattr(
-        self,
-        "previous_ball_bbox",
-        None
-    )
+         score = prediction.score.value
 
-    for prediction in result.object_prediction_list:
+         bbox = prediction.bbox.to_xyxy()
 
-        score = prediction.score.value
+         # =====================================
+         # MAP BACK TO ORIGINAL FRAME
+         # =====================================
 
-        bbox = prediction.bbox.to_xyxy()
-
-        # =====================================
-        # MAP BACK TO ORIGINAL FRAME
-        # =====================================
-
-        bbox = [
-            bbox[0] / self.ball_zoom_scale + crop_x1,
-            bbox[1] / self.ball_zoom_scale + crop_y1,
-            bbox[2] / self.ball_zoom_scale + crop_x1,
-            bbox[3] / self.ball_zoom_scale + crop_y1,
-        ]
+         bbox = [
+             bbox[0] / self.ball_zoom_scale + crop_x1,
+             bbox[1] / self.ball_zoom_scale + crop_y1,
+             bbox[2] / self.ball_zoom_scale + crop_x1,
+             bbox[3] / self.ball_zoom_scale + crop_y1,
+         ]
 
         # =====================================
         # BASIC FILTERS
         # =====================================
 
-        if not self.is_reasonable_ball_size(
-            bbox,
-            frame.shape
-        ):
-            continue
+         if not self.is_reasonable_ball_size(
+             bbox,
+             frame.shape
+         ):
+             continue
 
-        combined_score = score
+         combined_score = score
 
-        # =====================================
-        # CONTINUITY
-        # =====================================
+         # =====================================
+         # CONTINUITY
+         # =====================================
 
-        if previous_ball_bbox is not None:
+         if previous_ball_bbox is not None:
 
-            previous_center = get_center_of_bbox(
-                previous_ball_bbox
-            )
+             previous_center = get_center_of_bbox(
+                 previous_ball_bbox
+             )
 
-            current_center = get_center_of_bbox(
-                bbox
-            )
+             current_center = get_center_of_bbox(
+                 bbox
+             )
 
-            distance = np.linalg.norm(
-                np.array(current_center) -
-                np.array(previous_center)
-            )
+             distance = np.linalg.norm(
+                 np.array(current_center) -
+                 np.array(previous_center)
+             )
 
-            frame_diag = (
-                frame.shape[0] ** 2 +
-                frame.shape[1] ** 2
-            ) ** 0.5
+             frame_diag = (
+                 frame.shape[0] ** 2 +
+                 frame.shape[1] ** 2
+             ) ** 0.5
 
-            normalized_distance = distance / frame_diag
+             normalized_distance = distance / frame_diag
 
-            combined_score -= normalized_distance * 0.8
+             combined_score -= normalized_distance * 0.8
 
-        if combined_score > best_score:
-            best_score = combined_score
-            best_bbox = bbox
-
+         if combined_score > best_score:
+             best_score = combined_score
+             best_bbox = bbox
+ 
         
-     return best_bbox
+      return best_bbox
 
     
     def bbox_iou(self, box_a, box_b):
