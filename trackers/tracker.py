@@ -466,51 +466,51 @@ class Tracker:
         # CONFIDENCE GATE
         # =====================================
 
-        MIN_ACCEPTABLE_SCORE = 0.45
-        # Lower threshold for aerial balls
-        if previous_ball_bbox is not None:
+            MIN_ACCEPTABLE_SCORE = 0.45
+            # Lower threshold for aerial balls
+            if previous_ball_bbox is not None:
 
-            previous_height = (
-                previous_ball_bbox[3] -
-                previous_ball_bbox[1]
-            )
+                previous_height = (
+                    previous_ball_bbox[3] -
+                    previous_ball_bbox[1]
+                )
 
-            # Tiny previous ball -> likely aerial
-            if previous_height < 18:
-                MIN_ACCEPTABLE_SCORE = 0.28
+                # Tiny previous ball -> likely aerial
+                if previous_height < 18:
+                    MIN_ACCEPTABLE_SCORE = 0.28
 
 
         
-        if best_score < MIN_ACCEPTABLE_SCORE:
+            if best_score < MIN_ACCEPTABLE_SCORE:
 
-            self.ball_missing_frames += 1
+                self.ball_missing_frames += 1
 
-            # TRY SAHI RECOVERY
+                # TRY SAHI RECOVERY
 
-            sahi_bbox = self.get_ball_bbox_from_sahi(frame)
+                sahi_bbox = self.get_ball_bbox_from_sahi(frame)
 
-            if sahi_bbox is not None:
-                self.previous_ball_bbox = sahi_bbox
+                if sahi_bbox is not None:
+                    self.previous_ball_bbox = sahi_bbox
+                    self.ball_missing_frames = 0
+                    return sahi_bbox
+
+                # TEMPORARY MEMORY FALLBACK
+
+                if (
+                    self.previous_ball_bbox is not None and
+                    self.ball_missing_frames <= self.max_ball_missing_frames
+                ):
+                    return self.previous_ball_bbox
+
+                return None
+
+            # STORE PREVIOUS BALL
+
+            if best_bbox is not None:
+                self.previous_ball_bbox = best_bbox
                 self.ball_missing_frames = 0
-                return sahi_bbox
 
-            # TEMPORARY MEMORY FALLBACK
-
-            if (
-                self.previous_ball_bbox is not None and
-                self.ball_missing_frames <= self.max_ball_missing_frames
-            ):
-                return self.previous_ball_bbox
-
-            return None
-
-        # STORE PREVIOUS BALL
-
-        if best_bbox is not None:
-            self.previous_ball_bbox = best_bbox
-            self.ball_missing_frames = 0
-
-        return best_bbox
+            return best_bbox
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
@@ -540,7 +540,7 @@ class Tracker:
                 best_score = score
                 best_bbox = bbox
 
-        return best_bbox
+    return best_bbox
 
     def get_previous_ball_bbox(self, tracks, frame_num, lookback=8):
         start = max(0, frame_num - lookback)
