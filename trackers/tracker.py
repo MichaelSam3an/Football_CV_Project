@@ -515,7 +515,7 @@ class Tracker:
                     self.previous_ball_bbox = best_bbox
                     self.ball_missing_frames = 0
                     
-            return best_bbox
+                return best_bbox
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
