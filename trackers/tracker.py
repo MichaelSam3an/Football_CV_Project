@@ -8,6 +8,9 @@ import cv2
 import sys
 from pathlib import Path
 import torch
+from sahi.predict import get_sliced_prediction
+from sahi import AutoDetectionModel
+
 
 sys.path.append("../")
 
@@ -42,6 +45,12 @@ class Tracker:
                     f"Put yolov8s_ball_best.pt inside the models folder."
                 )
             self.ball_model = YOLO(ball_model_path)
+            self.sahi_ball_model = AutoDetectionModel.from_pretrained(
+                model_type="ultralytics",
+                model_path=ball_model_path,
+                confidence_threshold=0.10,
+                device="cuda:0" if torch.cuda.is_available() else "cpu"
+            )
 
         self.tracker = sv.ByteTrack(
             track_activation_threshold=0.20,
@@ -79,6 +88,7 @@ class Tracker:
         self.previous_ball_bbox = None
         self.ball_missing_frames = 0
         self.max_ball_missing_frames = 25
+        
 
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
@@ -143,7 +153,7 @@ class Tracker:
             detections += detections_batch
 
         return detections
-
+    
     def detect_ball_frames(self, frames):
         if not self.use_new_ball_model or self.ball_model is None:
             return [None for _ in frames]
@@ -163,6 +173,80 @@ class Tracker:
 
         return ball_detections
 
+
+    def get_ball_bbox_from_sahi(self, frame):
+
+        result = get_sliced_prediction(
+            frame,
+            self.sahi_ball_model,
+            slice_height=320,
+            slice_width=320,
+            overlap_height_ratio=0.2,
+            overlap_width_ratio=0.2,
+            verbose=0
+        )
+    
+        best_bbox = None
+        best_score = -999999
+
+        previous_ball_bbox = getattr(
+            self,
+            "previous_ball_bbox",
+            None
+        )
+
+        for prediction in result.object_prediction_list:
+
+            score = prediction.score.value
+
+            bbox = prediction.bbox.to_xyxy()
+
+            bbox = [
+                bbox[0],
+                bbox[1],
+                bbox[2],
+                bbox[3]
+            ]
+
+            if not self.is_reasonable_ball_size(
+                bbox,
+                frame.shape
+            ):
+                continue
+
+            combined_score = score
+
+            if previous_ball_bbox is not None:
+
+                previous_center = get_center_of_bbox(
+                    previous_ball_bbox
+                )
+
+                current_center = get_center_of_bbox(
+                    bbox
+                )
+
+                distance = np.linalg.norm(
+                    np.array(current_center) -
+                    np.array(previous_center)
+                )
+
+                frame_diag = (
+                    frame.shape[0] ** 2 +
+                    frame.shape[1] ** 2
+                ) ** 0.5
+
+                normalized_distance = distance / frame_diag
+
+                combined_score -= normalized_distance * 1.0
+
+            if combined_score > best_score:
+                best_score = combined_score
+                best_bbox = bbox
+
+        return best_bbox
+
+    
     def bbox_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = box_a
         bx1, by1, bx2, by2 = box_b
@@ -401,23 +485,37 @@ class Tracker:
 
             self.ball_missing_frames += 1
 
-            # Keep previous ball briefly
+            # =====================================
+            # TRY SAHI RECOVERY
+            # =====================================
+
+            sahi_bbox = self.get_ball_bbox_from_sahi(frame)
+
+            if sahi_bbox is not None:
+                self.previous_ball_bbox = sahi_bbox
+                self.ball_missing_frames = 0
+                return sahi_bbox
+
+            # =====================================
+            # TEMPORARY MEMORY FALLBACK
+            # =====================================
+
             if (
                 self.previous_ball_bbox is not None and
                 self.ball_missing_frames <= self.max_ball_missing_frames
             ):
                 return self.previous_ball_bbox
-            
+
             return None
+                # =====================================
+                # STORE PREVIOUS BALL
+                # =====================================
 
-        # =====================================
-        # STORE PREVIOUS BALL
-        # =====================================
-
-        if best_bbox is not None:
-            self.previous_ball_bbox = best_bbox
-            self.ball_missing_frames = 0
-        return best_bbox
+                if best_bbox is not None:
+                    self.previous_ball_bbox = best_bbox
+                    self.ball_missing_frames = 0
+                    
+            return best_bbox
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
