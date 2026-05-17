@@ -485,9 +485,7 @@ class Tracker:
 
             self.ball_missing_frames += 1
 
-            # =====================================
             # TRY SAHI RECOVERY
-            # =====================================
 
             sahi_bbox = self.get_ball_bbox_from_sahi(frame)
 
@@ -496,9 +494,7 @@ class Tracker:
                 self.ball_missing_frames = 0
                 return sahi_bbox
 
-            # =====================================
             # TEMPORARY MEMORY FALLBACK
-            # =====================================
 
             if (
                 self.previous_ball_bbox is not None and
@@ -507,15 +503,14 @@ class Tracker:
                 return self.previous_ball_bbox
 
             return None
-                # =====================================
-                # STORE PREVIOUS BALL
-                # =====================================
 
-                if best_bbox is not None:
-                    self.previous_ball_bbox = best_bbox
-                    self.ball_missing_frames = 0
-                    
-                return best_bbox
+        # STORE PREVIOUS BALL
+
+        if best_bbox is not None:
+            self.previous_ball_bbox = best_bbox
+            self.ball_missing_frames = 0
+
+        return best_bbox
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
