@@ -71,7 +71,7 @@ class Tracker:
 
         self.ball_conf = 0.22
         self.ball_imgsz = 960
-
+        
         # Ball filtering settings
         self.max_ball_interpolation_gap = 8
         self.max_ball_box_width_ratio = 0.12
@@ -92,6 +92,29 @@ class Tracker:
 
         self.ball_search_padding = 220
         self.ball_zoom_scale = 2.0
+
+
+        
+        self.ball_kalman = cv2.KalmanFilter(4, 2)
+        self.ball_kalman.transitionMatrix = np.array(
+            [[1, 0, 1, 0],
+             [0, 1, 0, 1],
+             [0, 0, 1, 0],
+             [0, 0, 0, 1]], dtype=np.float32
+        )
+        self.ball_kalman.measurementMatrix = np.array(
+            [[1, 0, 0, 0],
+             [0, 1, 0, 0]], dtype=np.float32
+        )
+        self.ball_kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
+        self.ball_kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
+        self.ball_kalman.errorCovPost = np.eye(4, dtype=np.float32)
+        self.ball_kalman.statePost = np.zeros((4, 1), dtype=np.float32)
+
+        self.ball_kalman_initialized = False
+        self.ball_kalman_last_size = None
+        self.ball_kalman_missed = 0
+        self.max_ball_kalman_missed = 6
 
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
@@ -337,6 +360,55 @@ class Tracker:
 
         return inter_area / union
 
+
+    # 2) add these methods inside Tracker (near the ball helper methods)
+    def init_ball_kalman(self, bbox):
+        cx, cy = get_center_of_bbox(bbox)
+        self.ball_kalman.statePost = np.array(
+            [[np.float32(cx)], [np.float32(cy)], [0.0], [0.0]],
+            dtype=np.float32
+        )
+        self.ball_kalman_initialized = True
+        w = max(6, int(bbox[2] - bbox[0]))
+        h = max(6, int(bbox[3] - bbox[1]))
+        self.ball_kalman_last_size = (w, h)
+        self.ball_kalman_missed = 0
+
+    def predict_ball_kalman_bbox(self):
+        if (not self.ball_kalman_initialized or
+                self.ball_kalman_last_size is None):
+            return None
+
+        pred = self.ball_kalman.predict()
+        cx = float(pred[0, 0])
+        cy = float(pred[1, 0])
+        w, h = self.ball_kalman_last_size
+
+        return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
+
+    def correct_ball_kalman(self, bbox):
+        if bbox is None:
+            return
+
+        cx, cy = get_center_of_bbox(bbox)
+        measurement = np.array(
+            [[np.float32(cx)], [np.float32(cy)]],
+            dtype=np.float32
+        )
+
+        if not self.ball_kalman_initialized:
+            self.init_ball_kalman(bbox)
+            return
+
+        self.ball_kalman.correct(measurement)
+        self.ball_kalman_last_size = (
+            max(6, int(bbox[2] - bbox[0])),
+            max(6, int(bbox[3] - bbox[1]))
+        )
+        self.ball_kalman_missed = 0
+
+
+
     def is_reasonable_ball_size(self, bbox, frame_shape):
         frame_height, frame_width = frame_shape[:2]
 
@@ -403,6 +475,8 @@ class Tracker:
 
         return False
 
+
+    
     def get_ball_bbox_from_ball_model(self, detection, frame):
 
         if detection is None or detection.boxes is None:
@@ -556,7 +630,10 @@ class Tracker:
                 sahi_bbox = self.get_ball_bbox_from_sahi(frame)
 
                 if sahi_bbox is not None:
+                    self.correct_ball_kalman(sahi_bbox)
                     self.previous_ball_bbox = sahi_bbox
+                    
+                    self.ball_kalman_missed = 0
                     self.ball_missing_frames = 0
                     return sahi_bbox
 
@@ -573,10 +650,21 @@ class Tracker:
             # STORE PREVIOUS BALL
 
             if best_bbox is not None:
+                self.correct_ball_kalman(best_bbox)
                 self.previous_ball_bbox = best_bbox
                 self.ball_missing_frames = 0
+                self.ball_kalman_missed = 0
+                return best_bbox
+                
+            self.ball_kalman_missed += 1
+            pred_bbox = self.predict_ball_kalman_bbox()
+            
+            if pred_bbox is not None and self.ball_kalman_missed <= self.max_ball_kalman_missed:
+                return pred_bbox
 
-        return best_bbox
+
+            
+            return None
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
