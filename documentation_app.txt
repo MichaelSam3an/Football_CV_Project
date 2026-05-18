@@ -1,0 +1,10 @@
+Technical Hand-off Details for the Web Developer:
+Pass these endpoint rules to the frontend/web developer:
+
+/analyze (POST): Upload the match video here.
+
+/progress-stream (GET - EventSource): Keep an open event listener here. It continuously passes a JSON object containing the current progress integer (progress) and whether the extra tactical data is finished cooking (metrics_ready).
+
+/analytics-data (GET): Once metrics_ready is true, hit this endpoint. It returns a pure JSON block containing all the tracked match data (e.g., player speeds, team possession split, distance calculations). The developer can parse this instantly to map out their graphs, data tables, or telemetry visualizations.
+
+/output/output_video.mp4 (GET): Point the UI HTML5 video layer here to stream the final visualized footage.
