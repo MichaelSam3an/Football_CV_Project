@@ -31,10 +31,8 @@ class Tracker:
         self.ball_model_path = ball_model_path
         self.device = DEVICE
 
-        # Main YOLO model: players + referees + goalkeeper
         self.model = YOLO(model_path)
 
-        # Optional custom YOLO model: ball only
         self.use_new_ball_model = use_new_ball_model
         self.ball_model = None
 
@@ -59,12 +57,7 @@ class Tracker:
             frame_rate=25
          )
 
-        self.previous_ball_bbox = None
-        self.ball_missing_frames = 0
-        self.max_ball_missing_frames = 12
         
-        self.ball_switch_candidate = None
-        self.ball_switch_frames = 0
         # Detection settings
         self.main_conf = 0.15
         self.main_imgsz = 960
@@ -79,10 +72,10 @@ class Tracker:
         self.max_ball_jump_ratio = 0.35
 
         # Play-area margins
-        self.play_area_left_ratio = -0.08
-        self.play_area_right_ratio = 1.08
-        self.play_area_top_ratio = -0.12
-        self.play_area_bottom_ratio = 1.03
+        self.play_area_left_ratio = 0.01
+        self.play_area_right_ratio = 0.99
+        self.play_area_top_ratio = 0.03
+        self.play_area_bottom_ratio = 0.98
 
         # Ball tracking memory
         self.previous_ball_bbox = None
@@ -93,28 +86,11 @@ class Tracker:
         self.ball_search_padding = 220
         self.ball_zoom_scale = 2.0
 
-
+        self.play_area_left_ratio = 0.01
+        self.play_area_right_ratio = 0.99
+        self.play_area_top_ratio = 0.03
+        self.play_area_bottom_ratio = 0.98
         
-        self.ball_kalman = cv2.KalmanFilter(4, 2)
-        self.ball_kalman.transitionMatrix = np.array(
-            [[1, 0, 1, 0],
-             [0, 1, 0, 1],
-             [0, 0, 1, 0],
-             [0, 0, 0, 1]], dtype=np.float32
-        )
-        self.ball_kalman.measurementMatrix = np.array(
-            [[1, 0, 0, 0],
-             [0, 1, 0, 0]], dtype=np.float32
-        )
-        self.ball_kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
-        self.ball_kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
-        self.ball_kalman.errorCovPost = np.eye(4, dtype=np.float32)
-        self.ball_kalman.statePost = np.zeros((4, 1), dtype=np.float32)
-
-        self.ball_kalman_initialized = False
-        self.ball_kalman_last_size = None
-        self.ball_kalman_missed = 0
-        self.max_ball_kalman_missed = 6
 
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
@@ -200,141 +176,61 @@ class Tracker:
         return ball_detections
 
 
-    def get_ball_bbox_from_sahi(self, frame):
+    def get_ball_candidates_from_sahi(self, frame):
+        frame_h, frame_w = frame.shape[:2]
 
-     frame_h, frame_w = frame.shape[:2]
+        if self.previous_ball_bbox is not None:
+            px1, py1, px2, py2 = self.previous_ball_bbox
+            cx = int((px1 + px2) / 2)
+            cy = int((py1 + py2) / 2)
 
-     # =====================================
-     # USE PREVIOUS BALL LOCATION
-     # =====================================
+            padding = self.ball_search_padding
+            crop_x1 = max(0, cx - padding)
+            crop_y1 = max(0, cy - padding)
+            crop_x2 = min(frame_w, cx + padding)
+            crop_y2 = min(frame_h, cy + padding)
 
-     if self.previous_ball_bbox is not None:
+            cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
+        else:
+            crop_x1 = 0
+            crop_y1 = 0
+            cropped_frame = frame
 
-         px1, py1, px2, py2 = self.previous_ball_bbox
+        if cropped_frame is None or cropped_frame.size == 0:
+            return []
 
-         cx = int((px1 + px2) / 2)
-         cy = int((py1 + py2) / 2)
+        zoomed_frame = cv2.resize(
+            cropped_frame,
+            None,
+            fx=self.ball_zoom_scale,
+            fy=self.ball_zoom_scale,
+            interpolation=cv2.INTER_CUBIC
+        )
 
-         padding = self.ball_search_padding
+        result = get_sliced_prediction(
+            zoomed_frame,
+            self.sahi_ball_model,
+            slice_height=320,
+            slice_width=320,
+            overlap_height_ratio=0.2,
+            overlap_width_ratio=0.2,
+            verbose=0
+        )
 
-         crop_x1 = max(0, cx - padding)
-         crop_y1 = max(0, cy - padding)
+        candidates = []
 
-         crop_x2 = min(frame_w, cx + padding)
-         crop_y2 = min(frame_h, cy + padding)
+        for prediction in result.object_prediction_list:
+            score = float(prediction.score.value)
+            bbox = prediction.bbox.to_xyxy()
+            bbox = [
+                bbox[0] / self.ball_zoom_scale + crop_x1,
+                bbox[1] / self.ball_zoom_scale + crop_y1,
+                bbox[2] / self.ball_zoom_scale + crop_x1,
+                bbox[3] / self.ball_zoom_scale + crop_y1,
+            ]
+            candidates.append((bbox, score, "sahi"))
 
-         cropped_frame = frame[
-             crop_y1:crop_y2,
-             crop_x1:crop_x2
-         ]
-
-     else:
- 
-         # fallback to full frame
-         crop_x1 = 0
-         crop_y1 = 0
-
-         cropped_frame = frame
-
-     # =====================================
-     # UPSCALE REGION
-     # =====================================
- 
-     zoomed_frame = cv2.resize(
-         cropped_frame,
-         None,
-         fx=self.ball_zoom_scale,
-         fy=self.ball_zoom_scale,
-         interpolation=cv2.INTER_CUBIC
-     )
-
-     # =====================================
-     # SAHI INFERENCE
-     # =====================================
-
-     result = get_sliced_prediction(
-         zoomed_frame,
-         self.sahi_ball_model,
-         slice_height=320,
-         slice_width=320,
-         overlap_height_ratio=0.2,
-         overlap_width_ratio=0.2,
-         verbose=0
-     )
-
-     best_bbox = None
-     best_score = -999999
-
-     previous_ball_bbox = getattr(
-         self,
-         "previous_ball_bbox",
-         None
-     )
-
-     for prediction in result.object_prediction_list:
-
-         score = prediction.score.value
-
-         bbox = prediction.bbox.to_xyxy()
-
-         # =====================================
-         # MAP BACK TO ORIGINAL FRAME
-         # =====================================
-
-         bbox = [
-             bbox[0] / self.ball_zoom_scale + crop_x1,
-             bbox[1] / self.ball_zoom_scale + crop_y1,
-             bbox[2] / self.ball_zoom_scale + crop_x1,
-             bbox[3] / self.ball_zoom_scale + crop_y1,
-         ]
-
-        # =====================================
-        # BASIC FILTERS
-        # =====================================
-
-         if not self.is_reasonable_ball_size(
-             bbox,
-             frame.shape
-         ):
-             continue
-
-         combined_score = score
-
-         # =====================================
-         # CONTINUITY
-         # =====================================
-
-         if previous_ball_bbox is not None:
-
-             previous_center = get_center_of_bbox(
-                 previous_ball_bbox
-             )
-
-             current_center = get_center_of_bbox(
-                 bbox
-             )
-
-             distance = np.linalg.norm(
-                 np.array(current_center) -
-                 np.array(previous_center)
-             )
-
-             frame_diag = (
-                 frame.shape[0] ** 2 +
-                 frame.shape[1] ** 2
-             ) ** 0.5
-
-             normalized_distance = distance / frame_diag
-
-             combined_score -= normalized_distance * 0.8
-
-         if combined_score > best_score:
-             best_score = combined_score
-             best_bbox = bbox
- 
-        
-     return best_bbox
-
+        return candidates
     
     def bbox_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = box_a
@@ -359,54 +255,6 @@ class Tracker:
             return 0.0
 
         return inter_area / union
-
-
-    # 2) add these methods inside Tracker (near the ball helper methods)
-    def init_ball_kalman(self, bbox):
-        cx, cy = get_center_of_bbox(bbox)
-        self.ball_kalman.statePost = np.array(
-            [[np.float32(cx)], [np.float32(cy)], [0.0], [0.0]],
-            dtype=np.float32
-        )
-        self.ball_kalman_initialized = True
-        w = max(6, int(bbox[2] - bbox[0]))
-        h = max(6, int(bbox[3] - bbox[1]))
-        self.ball_kalman_last_size = (w, h)
-        self.ball_kalman_missed = 0
-
-    def predict_ball_kalman_bbox(self):
-        if (not self.ball_kalman_initialized or
-                self.ball_kalman_last_size is None):
-            return None
-
-        pred = self.ball_kalman.predict()
-        cx = float(pred[0, 0])
-        cy = float(pred[1, 0])
-        w, h = self.ball_kalman_last_size
-
-        return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
-
-    def correct_ball_kalman(self, bbox):
-        if bbox is None:
-            return
-
-        cx, cy = get_center_of_bbox(bbox)
-        measurement = np.array(
-            [[np.float32(cx)], [np.float32(cy)]],
-            dtype=np.float32
-        )
-
-        if not self.ball_kalman_initialized:
-            self.init_ball_kalman(bbox)
-            return
-
-        self.ball_kalman.correct(measurement)
-        self.ball_kalman_last_size = (
-            max(6, int(bbox[2] - bbox[0])),
-            max(6, int(bbox[3] - bbox[1]))
-        )
-        self.ball_kalman_missed = 0
-
 
 
     def is_reasonable_ball_size(self, bbox, frame_shape):
@@ -463,208 +311,146 @@ class Tracker:
         if distance <= max_allowed_jump:
             return True
 
-        # Allow larger jumps for aerial balls
         current_height = current_bbox[3] - current_bbox[1]
         previous_height = previous_bbox[3] - previous_bbox[1]
 
         height_ratio = current_height / max(previous_height, 1)
 
-        # Ball appears smaller in air
         if height_ratio < 0.7:
             return distance <= max_allowed_jump * 2.0
 
         return False
 
 
-    
-    def get_ball_bbox_from_ball_model(self, detection, frame):
+    def score_ball_candidate(self, bbox, base_score, frame_shape, previous_ball_bbox=None):
+        frame_height, frame_width = frame_shape[:2]
 
-        if detection is None or detection.boxes is None:
+        x1, y1, x2, y2 = bbox
+        bbox_width = x2 - x1
+        bbox_height = y2 - y1
+
+        if bbox_width <= 1 or bbox_height <= 1:
+            return None
+
+        if bbox_width > frame_width * self.max_ball_box_width_ratio:
+            return None
+
+        if bbox_height > frame_height * self.max_ball_box_height_ratio:
+            return None
+
+        bbox_area = bbox_width * bbox_height
+
+        if bbox_area > 5000:
+            return None
+
+        aspect_ratio = bbox_width / max(bbox_height, 1)
+        if aspect_ratio > 2.5 or aspect_ratio < 0.4:
+            return None
+
+        score = float(base_score)
+
+        if 20 < bbox_area < 1200:
+            score += 0.20
+        elif bbox_area < 20:
+            score -= 0.10
+        else:
+            score -= 0.20
+    
+        cx, cy = get_center_of_bbox(bbox)
+        near_border = (
+            cx < frame_width * 0.08 or
+            cx > frame_width * 0.92 or
+            cy < frame_height * 0.08 or
+            cy > frame_height * 0.92
+        )
+
+        if near_border:
+            score += 0.05
+
+        if previous_ball_bbox is not None:
+            previous_center = get_center_of_bbox(previous_ball_bbox)
+            current_center = np.array([cx, cy], dtype=np.float32)
+
+            distance = np.linalg.norm(current_center - np.array(previous_center, dtype=np.float32))
+            frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
+            normalized_distance = distance / frame_diag
+
+            previous_height = previous_ball_bbox[3] - previous_ball_bbox[1]
+            is_aerial_ball = previous_height < 18 and bbox_height < 18
+
+            score -= normalized_distance * (0.8 if is_aerial_ball else 2.0)
+
+        return score
+
+
+    def get_ball_bbox_from_ball_model(self, detection, frame):
+        if detection is None:
+            return None
+
+        candidates = []
+
+        # YOLO candidates
+        if detection.boxes is not None:
+            for box in detection.boxes:
+                score = float(box.conf[0])
+                bbox = box.xyxy[0].tolist()
+                candidates.append((bbox, score))
+
+        # SAHI candidates
+        candidates.extend(self.get_ball_candidates_from_sahi(frame))
+
+        # No candidates at all
+        if len(candidates) == 0:
+            self.ball_missing_frames += 1
+
+            if (
+                self.previous_ball_bbox is not None and
+                self.ball_missing_frames <= self.max_ball_missing_frames
+            ):
+                return self.previous_ball_bbox
+
             return None
 
         best_bbox = None
         best_score = -999999
+        previous_ball_bbox = self.previous_ball_bbox
 
-        previous_ball_bbox = getattr(
-            self,
-            "previous_ball_bbox",
-            None
-        )
+        for bbox, base_score, *rest in candidates:
+            candidate_score = self.score_ball_candidate(
+                bbox=bbox,
+                base_score=base_score,
+                frame_shape=frame.shape,
+                previous_ball_bbox=previous_ball_bbox
+            )
 
-        for box in detection.boxes:
-
-            score = float(box.conf[0])
-            bbox = box.xyxy[0].tolist()
-
-            # =====================================
-            # BASIC FILTERS
-            # =====================================
-
-            if not self.is_reasonable_ball_size(
-                bbox,
-                frame.shape
-            ):
+            if candidate_score is None:
                 continue
 
-            if not self.is_inside_play_area(
-                bbox,
-                frame.shape
-            ):
-                continue
-
-            combined_score = score
-
-            # =====================================
-            # DISTANCE CONSISTENCY
-            # =====================================
-
-            if previous_ball_bbox is not None:
-
-                previous_center = get_center_of_bbox(
-                    previous_ball_bbox
-                )
-
-                current_center = get_center_of_bbox(
-                    bbox
-                )
-                cx, cy = current_center
-                frame_h, frame_w = frame.shape[:2]
-                near_border = (
-                    cx < frame_w * 0.12 or
-                    cx > frame_w * 0.88 or
-                    cy < frame_h * 0.12 or
-                    cy > frame_h * 0.88
-                )
-
-                
-                distance = np.linalg.norm(
-                    np.array(current_center) -
-                    np.array(previous_center)
-                )
-
-                frame_diag = (
-                    frame.shape[0] ** 2 +
-                    frame.shape[1] ** 2
-                ) ** 0.5
-
-                normalized_distance = distance / frame_diag
-                previous_height = (
-                    previous_ball_bbox[3] -
-                    previous_ball_bbox[1]
-                )
-
-                current_height = (
-                    bbox[3] -
-                    bbox[1]
-                )
-
-                # Tiny ball -> likely aerial
-                is_aerial_ball = (
-                    previous_height < 18 and
-                    current_height < 18
-                )
-
-                if is_aerial_ball:
-                    combined_score -= normalized_distance * 0.8
-                else:
-                    combined_score -= normalized_distance * 2.0
-            
-                
-
-            # =====================================
-            # SIZE CONSISTENCY
-            # =====================================
-
-            bbox_width = bbox[2] - bbox[0]
-            bbox_height = bbox[3] - bbox[1]
-
-            bbox_area = bbox_width * bbox_height
-
-            # Reject absurd detections
-            if bbox_area > 5000:
-                continue
-
-            # Reject weird aspect ratios
-            aspect_ratio = bbox_width / max(bbox_height, 1)
-
-            if aspect_ratio > 2.0 or aspect_ratio < 0.5:
-                continue
-
-            # Prefer realistic football sizes
-            if 20 < bbox_area < 1200:
-                combined_score += 0.2
-
-            # =====================================
-            # BEST DETECTION
-            # =====================================
-
-            if combined_score > best_score:
-                best_score = combined_score
+            if candidate_score > best_score:
+                best_score = candidate_score
                 best_bbox = bbox
 
-        # =====================================
-        # CONFIDENCE GATE
-        # =====================================
+        MIN_ACCEPTABLE_SCORE = 0.45
 
-            MIN_ACCEPTABLE_SCORE = 0.45
-            # Lower threshold for aerial balls
-            if previous_ball_bbox is not None:
+        if previous_ball_bbox is not None:
+            previous_height = previous_ball_bbox[3] - previous_ball_bbox[1]
+            if previous_height < 18:
+                MIN_ACCEPTABLE_SCORE = 0.28
 
-                previous_height = (
-                    previous_ball_bbox[3] -
-                    previous_ball_bbox[1]
-                )
+        if best_bbox is None or best_score < MIN_ACCEPTABLE_SCORE:
+            self.ball_missing_frames += 1
+    
+            if (
+                self.previous_ball_bbox is not None and
+                self.ball_missing_frames <= self.max_ball_missing_frames
+            ):
+                return self.previous_ball_bbox
 
-                # Tiny previous ball -> likely aerial
-                if previous_height < 18:
-                    MIN_ACCEPTABLE_SCORE = 0.28
-
-
-        
-            if best_score < MIN_ACCEPTABLE_SCORE:
-
-                self.ball_missing_frames += 1
-
-                # TRY SAHI RECOVERY
-
-                sahi_bbox = self.get_ball_bbox_from_sahi(frame)
-
-                if sahi_bbox is not None:
-                    self.correct_ball_kalman(sahi_bbox)
-                    self.previous_ball_bbox = sahi_bbox
-                    
-                    self.ball_kalman_missed = 0
-                    self.ball_missing_frames = 0
-                    return sahi_bbox
-
-                # TEMPORARY MEMORY FALLBACK
-
-                if (
-                    self.previous_ball_bbox is not None and
-                    self.ball_missing_frames <= self.max_ball_missing_frames
-                ):
-                    return self.previous_ball_bbox
-
-                return None
-
-            # STORE PREVIOUS BALL
-
-            if best_bbox is not None:
-                self.correct_ball_kalman(best_bbox)
-                self.previous_ball_bbox = best_bbox
-                self.ball_missing_frames = 0
-                self.ball_kalman_missed = 0
-                return best_bbox
-                
-            self.ball_kalman_missed += 1
-            pred_bbox = self.predict_ball_kalman_bbox()
-            
-            if pred_bbox is not None and self.ball_kalman_missed <= self.max_ball_kalman_missed:
-                return pred_bbox
-
-
-            
             return None
+
+        self.previous_ball_bbox = best_bbox
+        self.ball_missing_frames = 0
+        return best_bbox
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
@@ -809,48 +595,31 @@ class Tracker:
             ball_bbox = None
             ball_source = None
 
-            if self.use_new_ball_model:
-                ball_bbox = self.get_ball_bbox_from_ball_model(
-                    ball_detections[frame_num],
-                    frames[frame_num]
-                )
-                if ball_bbox is not None:
-                    ball_source = "custom"
-
-            if ball_bbox is None:
-                ball_bbox = self.get_ball_bbox_from_normal_detection(
-                    detection,
-                    frames[frame_num]
-                )
-                if ball_bbox is not None:
-                    ball_source = "normal"
-
+           if self.use_new_ball_model:
+              ball_bbox = self.get_ball_bbox_from_ball_model(
+                ball_detections[frame_num],
+                frames[frame_num]
+            )
             if ball_bbox is not None:
-                previous_ball_bbox = self.get_previous_ball_bbox(
-                    tracks=tracks,
-                    frame_num=frame_num,
-                    lookback=8
-                )
+                ball_source = "fused"
+        else:
+            ball_bbox = self.get_ball_bbox_from_normal_detection(
+                detection,
+                frames[frame_num]
+            )
+            if ball_bbox is not None:
+                ball_source = "normal"
 
-                valid_motion = self.is_valid_ball_motion(
-                    current_bbox=ball_bbox,
-                    previous_bbox=previous_ball_bbox,
-                    frame_shape=frames[frame_num].shape
-                )
+        if ball_bbox is not None:
+            tracks["ball"][frame_num][1] = {"bbox": ball_bbox}
 
-                if valid_motion:
-                    tracks["ball"][frame_num][1] = {"bbox": ball_bbox}
-
-                    if ball_source == "custom":
-                        new_ball_model_used += 1
-                    elif ball_source == "normal":
-                        normal_ball_used += 1
-                else:
-                    rejected_by_motion += 1
-                    missed_ball += 1
-            else:
-                missed_ball += 1
-
+            if ball_source == "fused":
+                new_ball_model_used += 1
+            elif ball_source == "normal":
+                normal_ball_used += 1
+        else:
+            missed_ball += 1
+            
         print(
             f"Ball detection | custom model: {new_ball_model_used}, "
             f"normal fallback: {normal_ball_used}, "
@@ -875,7 +644,6 @@ class Tracker:
         x_center, _ = get_center_of_bbox(bbox)
         width = get_bbox_width(bbox)
 
-        # Scale based on frame resolution
         scale = self.get_ui_scale(frame)
 
         cv2.ellipse(
