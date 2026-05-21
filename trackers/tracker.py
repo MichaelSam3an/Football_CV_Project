@@ -602,23 +602,23 @@ class Tracker:
              )
              if ball_bbox is not None:
                  ball_source = "fused"
-         else:
-             ball_bbox = self.get_ball_bbox_from_normal_detection(
-                 detection,
-                 frames[frame_num]
-             )
-             if ball_bbox is not None:
-                 ball_source = "normal"
+           else:
+               ball_bbox = self.get_ball_bbox_from_normal_detection(
+                   detection,
+                   frames[frame_num]
+               )
+               if ball_bbox is not None:
+                   ball_source = "normal"
 
-         if ball_bbox is not None:
-             tracks["ball"][frame_num][1] = {"bbox": ball_bbox}
+           if ball_bbox is not None:
+               tracks["ball"][frame_num][1] = {"bbox": ball_bbox}
 
-             if ball_source == "fused":
-                 new_ball_model_used += 1
-             elif ball_source == "normal":
-                 normal_ball_used += 1
-         else:
-             missed_ball += 1
+               if ball_source == "fused":
+                   new_ball_model_used += 1
+               elif ball_source == "normal":
+                   normal_ball_used += 1
+           else:
+               missed_ball += 1
             
         print(
             f"Ball detection | custom model: {new_ball_model_used}, "
