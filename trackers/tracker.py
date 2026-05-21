@@ -592,33 +592,33 @@ class Tracker:
                 if "referee" in cls_names_inv and cls_id == cls_names_inv["referee"]:
                     tracks["referees"][frame_num][track_id] = {"bbox": bbox}
 
-            ball_bbox = None
-            ball_source = None
+             ball_bbox = None
+             ball_source = None
 
-            if self.use_new_ball_model:
-               ball_bbox = self.get_ball_bbox_from_ball_model(
-                 ball_detections[frame_num],
-                 frames[frame_num]
-             )
+             if self.use_new_ball_model:
+                 ball_bbox = self.get_ball_bbox_from_ball_model(
+                     ball_detections[frame_num],
+                     frames[frame_num]
+                 )
+                 if ball_bbox is not None:
+                    ball_source = "fused"
+             else:
+                 ball_bbox = self.get_ball_bbox_from_normal_detection(
+                     detection,
+                     frames[frame_num]
+                 )
+                 if ball_bbox is not None:
+                     ball_source = "normal"
+
              if ball_bbox is not None:
-                 ball_source = "fused"
-           else:
-               ball_bbox = self.get_ball_bbox_from_normal_detection(
-                   detection,
-                   frames[frame_num]
-               )
-               if ball_bbox is not None:
-                   ball_source = "normal"
+                 tracks["ball"][frame_num][1] = {"bbox": ball_bbox}
 
-           if ball_bbox is not None:
-               tracks["ball"][frame_num][1] = {"bbox": ball_bbox}
-
-               if ball_source == "fused":
-                   new_ball_model_used += 1
-               elif ball_source == "normal":
-                   normal_ball_used += 1
-           else:
-               missed_ball += 1
+                 if ball_source == "fused":
+                     new_ball_model_used += 1
+                 elif ball_source == "normal":
+                     normal_ball_used += 1
+             else:
+                 missed_ball += 1
             
         print(
             f"Ball detection | custom model: {new_ball_model_used}, "
