@@ -1,10 +1,161 @@
-Technical Hand-off Details for the Web Developer:
-Pass these endpoint rules to the frontend/web developer:
+Base URL: http://localhost:5000
 
-/analyze (POST): Upload the match video here.
+Content-Type:
 
-/progress-stream (GET - EventSource): Keep an open event listener here. It continuously passes a JSON object containing the current progress integer (progress) and whether the extra tactical data is finished cooking (metrics_ready).
+multipart/form-data for video upload
+application/json for status and analytics responses
+1. Start Video Analysis
 
-/analytics-data (GET): Once metrics_ready is true, hit this endpoint. It returns a pure JSON block containing all the tracked match data (e.g., player speeds, team possession split, distance calculations). The developer can parse this instantly to map out their graphs, data tables, or telemetry visualizations.
+Used to upload a football video and begin processing it in the background.
 
-/output/output_video.mp4 (GET): Point the UI HTML5 video layer here to stream the final visualized footage.
+Endpoint: /analyze
+Method: POST
+
+Form Data:
+
+file → the video file to analyze
+
+Example (multipart upload):
+
+curl -X POST http://localhost:5000/analyze \
+  -F "file=@match.mp4"
+
+Returns:
+
+{
+  "status": "started",
+  "message": "Processing initialized. Monitor progress via /progress-stream or /status",
+  "output_video": "/output/match_output.mp4"
+}
+
+UI Tip:
+Call this from a file upload form, then immediately subscribe to progress updates.
+
+2. Get Current Processing Status
+
+Used to check the latest analysis state from the frontend.
+
+Endpoint: /status
+Method: GET
+
+Returns:
+
+{
+  "progress": 42,
+  "status": "processing",
+  "metrics_ready": false,
+  "message": "Processed 12600/30000 frames",
+  "output_video": "/output/match_output.mp4",
+  "analytics_file": ""
+}
+
+Possible status values:
+
+idle
+processing
+completed
+failed
+
+UI Tip:
+Use this for simple polling if you do not want SSE.
+
+3. Live Progress Stream
+
+Used to receive real-time processing updates without polling.
+
+Endpoint: /progress-stream
+Method: GET
+
+Type: Server-Sent Events (SSE)
+
+Example client usage:
+
+const source = new EventSource("http://localhost:5000/progress-stream");
+
+source.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log(data.progress, data.status, data.message);
+};
+
+Returns stream data like:
+
+{
+  "progress": 68,
+  "status": "processing",
+  "metrics_ready": false,
+  "message": "Processed 20400/30000 frames",
+  "output_video": "/output/match_output.mp4",
+  "analytics_file": ""
+}
+
+UI Tip:
+This is the best option for a live progress bar.
+
+4. Get Analytics Data
+
+Used to fetch the extracted match analytics after processing completes.
+
+Endpoint: /analytics-data
+Method: GET
+
+Returns:
+
+{
+  "possession": {},
+  "passes": {},
+  "team_stats": {},
+  "player_stats": {}
+}
+
+UI Tip:
+Disable this button until status === "completed".
+
+5. Download Processed Video
+
+Used to serve the generated output video file.
+
+Endpoint: /output/<filename>
+Method: GET
+
+Example:
+
+http://localhost:5000/output/match_output.mp4
+
+UI Tip:
+Render this inside a video player or use it as a direct download link.
+
+Technical Notes for Developers
+
+Upload format:
+The analysis endpoint expects multipart/form-data, not JSON.
+
+Upload key:
+Use file as the form field name.
+
+Progress handling:
+You have two options:
+
+SSE via /progress-stream for live updates
+polling via /status every 1–2 seconds
+
+Analytics timing:
+/analytics-data only becomes useful after processing finishes.
+
+Output behavior:
+Each upload gets its own output video name based on the input filename.
+
+Server behavior:
+Processing runs in a background thread, so the request returns immediately after starting.
+
+CORS:
+If your frontend runs on another port, enable CORS in Flask before production use.
+
+UI Tip:
+A clean integration pattern is:
+
+Upload video
+Start progress listener
+Show live percentage
+Poll /status as a fallback
+When completed, fetch /analytics-data
+Display or download /output/<filename>
