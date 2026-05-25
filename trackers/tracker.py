@@ -478,10 +478,10 @@ class Tracker:
 
             self.ball_candidate_frames += 1
 
-            else:
+        else:
 
-                self.ball_candidate_bbox = best_bbox
-                self.ball_candidate_frames = 1
+            self.ball_candidate_bbox = best_bbox
+            self.ball_candidate_frames = 1
 
         # Confirm switch
         if self.ball_candidate_frames >= self.ball_switch_confirm_frames:
