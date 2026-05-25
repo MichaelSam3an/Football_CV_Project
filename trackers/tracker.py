@@ -76,6 +76,10 @@ class Tracker:
         self.play_area_top_ratio = 0.03
         self.play_area_bottom_ratio = 0.98
 
+        self.ball_candidate_bbox = None
+        self.ball_candidate_frames = 0
+        self.ball_switch_confirm_frames = 2
+
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
             if object_name not in ["players", "referees", "ball"]:
@@ -414,7 +418,87 @@ class Tracker:
 
             return None
 
+
+
+        # Same area as previous ball -> trust immediately
+        if previous_ball_bbox is not None:
+
+            previous_center = get_center_of_bbox(previous_ball_bbox)
+            current_center = get_center_of_bbox(best_bbox)
+
+            distance = np.linalg.norm(
+                np.array(current_center) -
+                np.array(previous_center)
+            )
+
+            frame_diag = (
+                frame.shape[0] ** 2 +
+                frame.shape[1] ** 2
+            ) ** 0.5
+
+            normalized_distance = distance / frame_diag
+
+            # Small movement -> stable tracking
+            if normalized_distance < 0.04:
+
+                self.previous_ball_bbox = best_bbox
+                self.ball_missing_frames = 0
+                self.ball_candidate_bbox = None
+                self.ball_candidate_frames = 0
+                self.ball_search_padding = 180
+
+                return best_bbox
+
+        # Possible switch candidate
+        if self.ball_candidate_bbox is None:
+
+            self.ball_candidate_bbox = best_bbox
+            self.ball_candidate_frames = 1
+
+            return self.previous_ball_bbox
+
+        candidate_center = get_center_of_bbox(self.ball_candidate_bbox)
+        current_center = get_center_of_bbox(best_bbox)
+
+        candidate_distance = np.linalg.norm(
+            np.array(candidate_center) -
+            np.array(current_center)
+        )
+
+        frame_diag = (
+            frame.shape[0] ** 2 +
+            frame.shape[1] ** 2
+        ) ** 0.5
+
+        candidate_distance /= frame_diag
+
+        # Same candidate continuing
+        if candidate_distance < 0.03:
+
+        self.ball_candidate_frames += 1
+
+        else:
+
+            self.ball_candidate_bbox = best_bbox
+            self.ball_candidate_frames = 1
+
+        # Confirm switch
+        if self.ball_candidate_frames >= self.ball_switch_confirm_frames:
+
+            self.previous_ball_bbox = self.ball_candidate_bbox
+            self.ball_missing_frames = 0
+            self.ball_candidate_bbox = None
+            self.ball_candidate_frames = 0
+            self.ball_search_padding = 180
+
+            return self.previous_ball_bbox
+
+        # Keep previous until switch confirmed
+        return self.previous_ball_bbox
+        
+        
         # Update lock state
+        
         self.previous_ball_bbox = best_bbox
         self.ball_missing_frames = 0
         self.ball_lock_frames += 1
