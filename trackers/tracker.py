@@ -473,7 +473,7 @@ class Tracker:
         candidate_distance /= frame_diag
 
         # Same candidate continuing
-        if candidate_distance < 0.03:
+    if candidate_distance < 0.03:
 
         self.ball_candidate_frames += 1
 
