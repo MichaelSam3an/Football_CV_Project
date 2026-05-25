@@ -505,7 +505,7 @@ class Tracker:
         self.ball_lock_frames += 1
         self.ball_search_padding = 180
 
-      return best_bbox
+        return best_bbox
 
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
