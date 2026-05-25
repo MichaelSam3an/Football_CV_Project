@@ -54,7 +54,7 @@ class Tracker:
         self.main_conf = 0.15
         self.main_imgsz = 960
 
-        self.ball_conf = 0.14
+        self.ball_conf = 0.25
         self.ball_imgsz = 1280
         self.max_ball_missing_frames = 35
         
