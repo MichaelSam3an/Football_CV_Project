@@ -40,6 +40,7 @@ class Tracker:
                     f"Ball model not found: {ball_model_path}\n"
                     f"Put yolov8s_ball_best.pt inside the models folder."
                 )
+            self.ball_model = YOLO(ball_model_path)
 
         self.tracker = sv.ByteTrack(
             track_activation_threshold=0.20,
@@ -62,11 +63,6 @@ class Tracker:
         self.max_ball_box_height_ratio = 0.12
         self.max_ball_jump_ratio = 0.35
 
-        # Play-area margins
-        self.play_area_left_ratio = 0.01
-        self.play_area_right_ratio = 0.99
-        self.play_area_top_ratio = 0.03
-        self.play_area_bottom_ratio = 0.98
 
         # Ball tracking memory
         self.previous_ball_bbox = None
@@ -185,62 +181,7 @@ class Tracker:
 
         return ball_detections
 
-
-    def get_ball_candidates_from_sahi(self, frame):
-        frame_h, frame_w = frame.shape[:2]
-
-        if self.previous_ball_bbox is not None:
-            px1, py1, px2, py2 = self.previous_ball_bbox
-            cx = int((px1 + px2) / 2)
-            cy = int((py1 + py2) / 2)
-
-            padding = self.ball_search_padding
-            crop_x1 = max(0, cx - padding)
-            crop_y1 = max(0, cy - padding)
-            crop_x2 = min(frame_w, cx + padding)
-            crop_y2 = min(frame_h, cy + padding)
-
-            cropped_frame = frame[crop_y1:crop_y2, crop_x1:crop_x2]
-        else:
-            crop_x1 = 0
-            crop_y1 = 0
-            cropped_frame = frame
-
-        if cropped_frame is None or cropped_frame.size == 0:
-            return []
-
-        zoomed_frame = cv2.resize(
-            cropped_frame,
-            None,
-            fx=self.ball_zoom_scale,
-            fy=self.ball_zoom_scale,
-            interpolation=cv2.INTER_CUBIC
-        )
-
-        result = get_sliced_prediction(
-            zoomed_frame,
-            self.sahi_ball_model,
-            slice_height=320,
-            slice_width=320,
-            overlap_height_ratio=0.2,
-            overlap_width_ratio=0.2,
-            verbose=0
-        )
-
-        candidates = []
-
-        for prediction in result.object_prediction_list:
-            score = float(prediction.score.value)
-            bbox = prediction.bbox.to_xyxy()
-            bbox = [
-                bbox[0] / self.ball_zoom_scale + crop_x1,
-                bbox[1] / self.ball_zoom_scale + crop_y1,
-                bbox[2] / self.ball_zoom_scale + crop_x1,
-                bbox[3] / self.ball_zoom_scale + crop_y1,
-            ]
-            candidates.append((bbox, score, "sahi"))
-
-        return candidates
+    
     
     def bbox_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = box_a
@@ -663,8 +604,6 @@ class Tracker:
             f"Ball detection | custom model: {new_ball_model_used}, "
             f"normal fallback: {normal_ball_used}, "
             f"missed: {missed_ball}, "
-            f"rejected motion: {rejected_by_motion}, "
-            f"rejected filter: {rejected_by_filter}"
         )
 
         if stub_path is not None:
