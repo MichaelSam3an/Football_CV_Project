@@ -40,13 +40,6 @@ class Tracker:
                     f"Ball model not found: {ball_model_path}\n"
                     f"Put yolov8s_ball_best.pt inside the models folder."
                 )
-            self.ball_model = YOLO(ball_model_path)
-            self.sahi_ball_model = AutoDetectionModel.from_pretrained(
-                model_type="ultralytics",
-                model_path=ball_model_path,
-                confidence_threshold=0.10,
-                device="cuda:0" if torch.cuda.is_available() else "cpu"
-            )
 
         self.tracker = sv.ByteTrack(
             track_activation_threshold=0.20,
@@ -79,10 +72,7 @@ class Tracker:
         self.previous_ball_bbox = None
         self.ball_missing_frames = 0
         self.max_ball_missing_frames = 25
-
-
-        self.ball_search_padding = 220
-        self.ball_zoom_scale = 2.0
+        
 
         self.play_area_left_ratio = 0.01
         self.play_area_right_ratio = 0.99
