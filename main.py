@@ -3,6 +3,8 @@ import cv2
 import numpy as np
 import gc
 import os
+import json
+import time
 import csv
 import argparse
 from pathlib import Path
@@ -837,6 +839,23 @@ def process_chunk(
 
 
 def main():
+    def write_progress(
+    progress_file,
+    progress,
+    status="processing",
+    message=""
+):
+    data = {
+        "progress": round(float(progress), 2),
+        "status": status,
+        "message": message,
+        "timestamp": time.time()
+    }
+
+    with open(progress_file, "w") as f:
+        json.dump(data, f)
+
+    
     parser = argparse.ArgumentParser(description="Football CV pipeline")
     parser.add_argument(
         "--input_video",
@@ -863,6 +882,10 @@ def main():
     OUTPUT_VIDEO_PATH = args.output_video
     CHUNK_SIZE = args.chunk_size
     OUTPUT_DIR = str(Path(OUTPUT_VIDEO_PATH).parent)
+    progress_file = os.path.join(
+    OUTPUT_DIR,
+    "progress.json"
+        )
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -953,6 +976,13 @@ def main():
         unit="frame"
     )
 
+    write_progress(
+        progress_file,
+        progress=0,
+        status="processing",
+        message="Starting video processing"
+    )
+
     while True:
         ret, frame = cap.read()
 
@@ -997,6 +1027,16 @@ def main():
                 out.write(output_frame)
 
             frame_offset += len(chunk_frames)
+            progress_percent = (
+                frame_offset / total_video_frames
+            ) * 100
+
+            write_progress(
+                progress_file,
+                progress=progress_percent,
+                status="processing",
+                message=f"Processed {frame_offset}/{total_video_frames} frames"
+            )
 
             chunk_frames.clear()
             del output_frames
@@ -1043,7 +1083,15 @@ def main():
     out.release()
 
     analytics.save_all(ball_control_history)
+    write_progress(
+        progress_file,
+        progress=100,
+        status="completed",
+        message="Video processing completed"
+    )
 
+
+    
     save_game_state_csv(
         game_state_history=game_state_history,
         output_dir=OUTPUT_DIR
