@@ -54,8 +54,9 @@ class Tracker:
         self.main_conf = 0.15
         self.main_imgsz = 960
 
-        self.ball_conf = 0.22
-        self.ball_imgsz = 960
+        self.ball_conf = 0.14
+        self.ball_imgsz = 1280
+        self.max_ball_missing_frames = 35
         
         # Ball filtering settings
         self.max_ball_interpolation_gap = 8
@@ -322,14 +323,21 @@ class Tracker:
             previous_center = get_center_of_bbox(previous_ball_bbox)
             current_center = np.array([cx, cy], dtype=np.float32)
 
-            distance = np.linalg.norm(current_center - np.array(previous_center, dtype=np.float32))
+            distance = np.linalg.norm(
+                current_center - np.array(previous_center, dtype=np.float32)
+            )
+
             frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
             normalized_distance = distance / frame_diag
 
             previous_height = previous_ball_bbox[3] - previous_ball_bbox[1]
             is_aerial_ball = previous_height < 18 and bbox_height < 18
 
-            score -= normalized_distance * (0.8 if is_aerial_ball else 2.0)
+            # Very small movement should not be penalized
+            if normalized_distance < 0.03:
+                score += 0.12
+            else:
+                score -= normalized_distance * (0.5 if is_aerial_ball else 1.2)
 
         return score
 
@@ -389,6 +397,49 @@ class Tracker:
 
         previous_ball_bbox = self.previous_ball_bbox
 
+        local_candidates = []
+
+        if self.previous_ball_bbox is not None:
+            frame_h, frame_w = frame.shape[:2]
+            px1, py1, px2, py2 = self.previous_ball_bbox
+            cx = int((px1 + px2) / 2)
+            cy = int((py1 + py2) / 2)
+
+            pad = 180
+            x1 = max(0, cx - pad)
+            y1 = max(0, cy - pad)
+            x2 = min(frame_w, cx + pad)
+            y2 = min(frame_h, cy + pad)
+
+            crop = frame[y1:y2, x1:x2]
+
+            if crop.size > 0:
+                crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
+
+                crop_det = self.ball_model.predict(
+                    crop,
+                    conf=self.ball_conf,
+                    device=self.device,
+                    imgsz=self.ball_imgsz,
+                    verbose=False
+                )[0]
+
+                if crop_det.boxes is not None:
+                    for box in crop_det.boxes:
+                        score = float(box.conf[0])
+                        bbox = box.xyxy[0].tolist()
+
+                        # map back to full-frame coordinates
+                        bbox = [
+                            bbox[0] / 2.0 + x1,
+                            bbox[1] / 2.0 + y1,
+                            bbox[2] / 2.0 + x1,
+                            bbox[3] / 2.0 + y1,
+                        ]
+
+                        candidates.append((bbox, score))
+        
+        
         for box in detection.boxes:
             score = float(box.conf[0])
             bbox = box.xyxy[0].tolist()
