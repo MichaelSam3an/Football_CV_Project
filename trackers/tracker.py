@@ -392,6 +392,7 @@ class Tracker:
         if detection is None or detection.boxes is None:
             return None
 
+        candidates = []
         best_bbox = None
         best_score = -999999
 
