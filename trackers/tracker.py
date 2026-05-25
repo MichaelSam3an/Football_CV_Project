@@ -54,7 +54,7 @@ class Tracker:
         self.main_conf = 0.15
         self.main_imgsz = 960
 
-        self.ball_conf = 0.14
+        self.ball_conf = 0.12
         self.ball_imgsz = 1280
         self.max_ball_missing_frames = 35
         
@@ -63,8 +63,6 @@ class Tracker:
         self.max_ball_box_width_ratio = 0.12
         self.max_ball_box_height_ratio = 0.12
         
-        self.ball_lock_frames = 0
-        self.ball_lock_threshold = 8
         self.ball_search_padding = 180
         self.ball_search_padding_step = 80
         self.ball_max_search_padding = 420
@@ -357,6 +355,11 @@ class Tracker:
         if len(candidates) == 0:
             self.ball_missing_frames += 1
             self.ball_lock_frames = 0
+            
+            self.ball_search_padding = min(
+                self.ball_search_padding + self.ball_search_padding_step,
+                self.ball_max_search_padding
+            )
 
             if (
                 self.previous_ball_bbox is not None and
@@ -364,6 +367,8 @@ class Tracker:
             ):
                 return self.previous_ball_bbox
 
+            
+            
             return None
 
         best_bbox = None
@@ -396,6 +401,11 @@ class Tracker:
             self.ball_missing_frames += 1
             self.ball_lock_frames = 0
 
+            self.ball_search_padding = min(
+                self.ball_search_padding + self.ball_search_padding_step,
+                self.ball_max_search_padding
+            )
+
             if (
                 self.previous_ball_bbox is not None and
                 self.ball_missing_frames <= self.max_ball_missing_frames
@@ -408,15 +418,7 @@ class Tracker:
         self.previous_ball_bbox = best_bbox
         self.ball_missing_frames = 0
         self.ball_lock_frames += 1
-
-        # Expand search slowly if ball has been stable for a while
-        if self.ball_lock_frames >= self.ball_lock_threshold:
-            self.ball_search_padding = min(
-                self.ball_search_padding + self.ball_search_padding_step,
-                self.ball_max_search_padding
-            )
-        else:
-            self.ball_search_padding = 180
+        self.ball_search_padding = 180
 
         return best_bbox
 
