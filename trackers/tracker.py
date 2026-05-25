@@ -49,12 +49,12 @@ class Tracker:
             frame_rate=25
          )
 
-        
+
         # Detection settings
         self.main_conf = 0.15
         self.main_imgsz = 960
 
-        self.ball_conf = 0.25
+        self.ball_conf = 0.14
         self.ball_imgsz = 1280
         self.max_ball_missing_frames = 35
         
@@ -62,42 +62,21 @@ class Tracker:
         self.max_ball_interpolation_gap = 8
         self.max_ball_box_width_ratio = 0.12
         self.max_ball_box_height_ratio = 0.12
-        self.max_ball_jump_ratio = 0.35
-
+        
+        self.ball_lock_frames = 0
+        self.ball_lock_threshold = 8
+        self.ball_search_padding = 180
+        self.ball_search_padding_step = 80
+        self.ball_max_search_padding = 420
 
         # Ball tracking memory
         self.previous_ball_bbox = None
-        self.ball_missing_frames = 0
-        self.max_ball_missing_frames = 25
-        
+        self.ball_missing_frames = 0        
 
         self.play_area_left_ratio = 0.01
         self.play_area_right_ratio = 0.99
         self.play_area_top_ratio = 0.03
         self.play_area_bottom_ratio = 0.98
-
-
-
-        self.ball_kalman = cv2.KalmanFilter(4, 2)
-        self.ball_kalman.transitionMatrix = np.array(
-            [[1, 0, 1, 0],
-             [0, 1, 0, 1],
-             [0, 0, 1, 0],
-             [0, 0, 0, 1]], dtype=np.float32
-        )
-        self.ball_kalman.measurementMatrix = np.array(
-            [[1, 0, 0, 0],
-             [0, 1, 0, 0]], dtype=np.float32
-        )
-        self.ball_kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
-        self.ball_kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
-        self.ball_kalman.errorCovPost = np.eye(4, dtype=np.float32)
-        self.ball_kalman.statePost = np.zeros((4, 1), dtype=np.float32)
-
-        self.ball_kalman_initialized = False
-        self.ball_kalman_last_size = None
-        self.ball_kalman_missed = 0
-        self.max_ball_kalman_missed = 6
 
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
@@ -244,36 +223,64 @@ class Tracker:
 
         return True
 
-    def is_valid_ball_motion(self, current_bbox, previous_bbox, frame_shape):
-        if previous_bbox is None:
-            return True
 
-        frame_height, frame_width = frame_shape[:2]
-        frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
+    def get_ball_candidates_from_local_crop(self, frame):
+        if self.previous_ball_bbox is None:
+            return []
 
-        current_center = get_center_of_bbox(current_bbox)
-        previous_center = get_center_of_bbox(previous_bbox)
+        frame_h, frame_w = frame.shape[:2]
+        px1, py1, px2, py2 = self.previous_ball_bbox
+        cx = int((px1 + px2) / 2)
+        cy = int((py1 + py2) / 2)
 
-        dx = current_center[0] - previous_center[0]
-        dy = current_center[1] - previous_center[1]
-        distance = (dx ** 2 + dy ** 2) ** 0.5
+        padding = self.ball_search_padding
 
-        max_allowed_jump = frame_diag * self.max_ball_jump_ratio
+        x1 = max(0, cx - padding)
+        y1 = max(0, cy - padding)
+        x2 = min(frame_w, cx + padding)
+        y2 = min(frame_h, cy + padding)
 
-        if distance <= max_allowed_jump:
-            return True
+        crop = frame[y1:y2, x1:x2]
+        if crop is None or crop.size == 0:
+            return []
 
-        current_height = current_bbox[3] - current_bbox[1]
-        previous_height = previous_bbox[3] - previous_bbox[1]
+        crop = cv2.resize(
+            crop,
+            None,
+            fx=2.0,
+            fy=2.0,
+            interpolation=cv2.INTER_CUBIC
+        )
 
-        height_ratio = current_height / max(previous_height, 1)
+        detections = self.ball_model.predict(
+            crop,
+            conf=self.ball_conf,
+            device=self.device,
+            imgsz=self.ball_imgsz,
+            verbose=False
+        )
 
-        if height_ratio < 0.7:
-            return distance <= max_allowed_jump * 2.0
+        candidates = []
 
-        return False
+        if len(detections) == 0 or detections[0].boxes is None:
+            return []
 
+        for box in detections[0].boxes:
+            score = float(box.conf[0])
+            bbox = box.xyxy[0].tolist()
 
+            bbox = [
+                bbox[0] / 2.0 + x1,
+                bbox[1] / 2.0 + y1,
+                bbox[2] / 2.0 + x1,
+                bbox[3] / 2.0 + y1,
+            ]
+
+            candidates.append((bbox, score))
+
+        return candidates
+
+    
     def score_ball_candidate(self, bbox, base_score, frame_shape, previous_ball_bbox=None):
         frame_height, frame_width = frame_shape[:2]
 
@@ -291,7 +298,6 @@ class Tracker:
             return None
 
         bbox_area = bbox_width * bbox_height
-
         if bbox_area > 5000:
             return None
 
@@ -304,20 +310,11 @@ class Tracker:
         if 20 < bbox_area < 1200:
             score += 0.20
         elif bbox_area < 20:
-            score -= 0.10
+            score -= 0.05
         else:
-            score -= 0.20
-    
-        cx, cy = get_center_of_bbox(bbox)
-        near_border = (
-            cx < frame_width * 0.08 or
-            cx > frame_width * 0.92 or
-            cy < frame_height * 0.08 or
-            cy > frame_height * 0.92
-        )
+            score -= 0.15
 
-        if near_border:
-            score += 0.05
+        cx, cy = get_center_of_bbox(bbox)
 
         if previous_ball_bbox is not None:
             previous_center = get_center_of_bbox(previous_ball_bbox)
@@ -333,121 +330,50 @@ class Tracker:
             previous_height = previous_ball_bbox[3] - previous_ball_bbox[1]
             is_aerial_ball = previous_height < 18 and bbox_height < 18
 
-            # Very small movement should not be penalized
             if normalized_distance < 0.03:
                 score += 0.12
             else:
-                score -= normalized_distance * (0.5 if is_aerial_ball else 1.2)
+                score -= normalized_distance * (0.5 if is_aerial_ball else 1.0)
 
         return score
 
-
-
-    def init_ball_kalman(self, bbox):
-        cx, cy = get_center_of_bbox(bbox)
-        self.ball_kalman.statePost = np.array(
-            [[np.float32(cx)], [np.float32(cy)], [0.0], [0.0]],
-            dtype=np.float32
-        )
-        self.ball_kalman_initialized = True
-        w = max(6, int(bbox[2] - bbox[0]))
-        h = max(6, int(bbox[3] - bbox[1]))
-        self.ball_kalman_last_size = (w, h)
-        self.ball_kalman_missed = 0
-
-    def predict_ball_kalman_bbox(self):
-        if (not self.ball_kalman_initialized or self.ball_kalman_last_size is None):
-            return None
-
-        pred = self.ball_kalman.predict()
-        cx = float(pred[0, 0])
-        cy = float(pred[1, 0])
-        w, h = self.ball_kalman_last_size
-
-        return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
-
-    def correct_ball_kalman(self, bbox):
-        if bbox is None:
-            return
-
-        cx, cy = get_center_of_bbox(bbox)
-        measurement = np.array(
-            [[np.float32(cx)], [np.float32(cy)]],
-            dtype=np.float32
-        )
-
-        if not self.ball_kalman_initialized:
-            self.init_ball_kalman(bbox)
-            return
-
-        self.ball_kalman.correct(measurement)
-        self.ball_kalman_last_size = (
-            max(6, int(bbox[2] - bbox[0])),
-            max(6, int(bbox[3] - bbox[1]))
-        )
-        self.ball_kalman_missed = 0
-    
-
     def get_ball_bbox_from_ball_model(self, detection, frame):
-        if detection is None or detection.boxes is None:
+        if detection is None:
             return None
 
         candidates = []
+
+        # Full-frame YOLO candidates
+        if detection.boxes is not None:
+            for box in detection.boxes:
+                score = float(box.conf[0])
+                bbox = box.xyxy[0].tolist()
+                candidates.append((bbox, score))
+
+        # Local crop candidates around last trusted ball
+        if self.previous_ball_bbox is not None:
+            candidates.extend(self.get_ball_candidates_from_local_crop(frame))
+
+        if len(candidates) == 0:
+            self.ball_missing_frames += 1
+            self.ball_lock_frames = 0
+
+            if (
+                self.previous_ball_bbox is not None and
+                self.ball_missing_frames <= self.max_ball_missing_frames
+            ):
+                return self.previous_ball_bbox
+
+            return None
+
         best_bbox = None
         best_score = -999999
-
         previous_ball_bbox = self.previous_ball_bbox
 
-        local_candidates = []
-
-        if self.previous_ball_bbox is not None:
-            frame_h, frame_w = frame.shape[:2]
-            px1, py1, px2, py2 = self.previous_ball_bbox
-            cx = int((px1 + px2) / 2)
-            cy = int((py1 + py2) / 2)
-
-            pad = 180
-            x1 = max(0, cx - pad)
-            y1 = max(0, cy - pad)
-            x2 = min(frame_w, cx + pad)
-            y2 = min(frame_h, cy + pad)
-
-            crop = frame[y1:y2, x1:x2]
-
-            if crop.size > 0:
-                crop = cv2.resize(crop, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-
-                crop_det = self.ball_model.predict(
-                    crop,
-                    conf=self.ball_conf,
-                    device=self.device,
-                    imgsz=self.ball_imgsz,
-                    verbose=False
-                )[0]
-
-                if crop_det.boxes is not None:
-                    for box in crop_det.boxes:
-                        score = float(box.conf[0])
-                        bbox = box.xyxy[0].tolist()
-
-                        # map back to full-frame coordinates
-                        bbox = [
-                            bbox[0] / 2.0 + x1,
-                            bbox[1] / 2.0 + y1,
-                            bbox[2] / 2.0 + x1,
-                            bbox[3] / 2.0 + y1,
-                        ]
-
-                        candidates.append((bbox, score))
-        
-        
-        for box in detection.boxes:
-            score = float(box.conf[0])
-            bbox = box.xyxy[0].tolist()
-
+        for bbox, base_score in candidates:
             candidate_score = self.score_ball_candidate(
                 bbox=bbox,
-                base_score=score,
+                base_score=base_score,
                 frame_shape=frame.shape,
                 previous_ball_bbox=previous_ball_bbox
             )
@@ -466,25 +392,34 @@ class Tracker:
             if previous_height < 18:
                 MIN_ACCEPTABLE_SCORE = 0.28
 
-        if best_bbox is not None and best_score >= MIN_ACCEPTABLE_SCORE:
-            self.correct_ball_kalman(best_bbox)
-            self.previous_ball_bbox = best_bbox
-            self.ball_missing_frames = 0
-            self.ball_kalman_missed = 0
-            return best_bbox
+        if best_bbox is None or best_score < MIN_ACCEPTABLE_SCORE:
+            self.ball_missing_frames += 1
+            self.ball_lock_frames = 0
 
-        self.ball_missing_frames += 1
-        self.ball_kalman_missed += 1
+            if (
+                self.previous_ball_bbox is not None and
+                self.ball_missing_frames <= self.max_ball_missing_frames
+            ):
+                return self.previous_ball_bbox
 
-        if self.ball_kalman_initialized and self.ball_kalman_missed <= self.max_ball_kalman_missed:
-            pred_bbox = self.predict_ball_kalman_bbox()
-            if pred_bbox is not None:
-                return pred_bbox
+            return None
 
-        if self.previous_ball_bbox is not None and self.ball_missing_frames <= self.max_ball_missing_frames:
-            return self.previous_ball_bbox
+        # Update lock state
+        self.previous_ball_bbox = best_bbox
+        self.ball_missing_frames = 0
+        self.ball_lock_frames += 1
 
-        return None
+        # Expand search slowly if ball has been stable for a while
+        if self.ball_lock_frames >= self.ball_lock_threshold:
+            self.ball_search_padding = min(
+                self.ball_search_padding + self.ball_search_padding_step,
+                self.ball_max_search_padding
+            )
+        else:
+            self.ball_search_padding = 180
+
+        return best_bbox
+
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
@@ -655,7 +590,7 @@ class Tracker:
         print(
             f"Ball detection | custom model: {new_ball_model_used}, "
             f"normal fallback: {normal_ball_used}, "
-            f"missed: {missed_ball}, "
+            f"missed: {missed_ball} "
         )
 
         if stub_path is not None:
