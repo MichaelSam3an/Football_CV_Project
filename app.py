@@ -1,12 +1,12 @@
 import os
 import json
 import time
-import sys
-import subprocess
 import threading
 
 from flask import Flask, request, jsonify, Response, send_from_directory
 from werkzeug.utils import secure_filename
+
+from main import process_video
 
 app = Flask(__name__)
 
@@ -20,50 +20,85 @@ app.config["OUTPUT_FOLDER"] = OUTPUT_FOLDER
 processing_status = {
     "progress": 0,
     "status": "idle",
-    "metrics_ready": False
+    "metrics_ready": False,
+    "message": "",
+    "output_video": "",
+    "analytics_file": ""
 }
 
+status_lock = threading.Lock()
+
+
+def update_processing_status(progress=None, status=None, metrics_ready=None, message=None,
+                             output_video=None, analytics_file=None):
+    with status_lock:
+        if progress is not None:
+            processing_status["progress"] = int(progress)
+        if status is not None:
+            processing_status["status"] = status
+        if metrics_ready is not None:
+            processing_status["metrics_ready"] = metrics_ready
+        if message is not None:
+            processing_status["message"] = message
+        if output_video is not None:
+            processing_status["output_video"] = output_video
+        if analytics_file is not None:
+            processing_status["analytics_file"] = analytics_file
+
+
+def progress_callback(progress):
+    update_processing_status(
+        progress=progress,
+        status="processing",
+        message=f"Processing... {progress}%"
+    )
+
+
 def run_pipeline_job(input_path: str, output_path: str) -> None:
-    global processing_status
-
     try:
-        processing_status["progress"] = 5
-        processing_status["status"] = "processing"
-        processing_status["metrics_ready"] = False
-
-        # Run the existing CV pipeline in main.py
-        result = subprocess.run(
-            [
-                sys.executable,
-                os.path.join(BASE_DIR, "main.py"),
-                "--input_video", input_path,
-                "--output_video", output_path,
-                "--chunk_size", "75",
-            ],
-            cwd=BASE_DIR,
-            capture_output=True,
-            text=True
+        update_processing_status(
+            progress=0,
+            status="processing",
+            metrics_ready=False,
+            message="Starting processing",
+            output_video=f"/output/{os.path.basename(output_path)}",
+            analytics_file=""
         )
 
-        if result.returncode != 0:
-            print("Pipeline failed.")
-            print(result.stdout)
-            print(result.stderr)
-            processing_status["status"] = "failed"
-            processing_status["progress"] = 0
+        result = process_video(
+            input_video_path=input_path,
+            output_video_path=output_path,
+            progress_callback=progress_callback,
+            chunk_size=75
+        )
+
+        if not isinstance(result, dict) or result.get("status") != "completed":
+            update_processing_status(
+                status="failed",
+                metrics_ready=False,
+                message=result.get("message", "Pipeline failed") if isinstance(result, dict) else "Pipeline failed"
+            )
             return
 
-        processing_status["progress"] = 95
+        analytics_path = result.get("analytics_file", "")
+        output_video_path = result.get("output_video", output_path)
 
-        analytics_path = os.path.join(app.config["OUTPUT_FOLDER"], "analytics_data.json")
-        processing_status["metrics_ready"] = os.path.exists(analytics_path)
-        processing_status["progress"] = 100
-        processing_status["status"] = "completed"
+        update_processing_status(
+            progress=100,
+            status="completed",
+            metrics_ready=os.path.exists(analytics_path),
+            message="Processing completed",
+            output_video=f"/output/{os.path.basename(output_video_path)}",
+            analytics_file=analytics_path
+        )
 
     except Exception as e:
-        print(f"Pipeline exception: {e}")
-        processing_status["status"] = "failed"
-        processing_status["metrics_ready"] = False
+        update_processing_status(
+            status="failed",
+            metrics_ready=False,
+            message=str(e)
+        )
+
 
 @app.route("/analyze", methods=["POST"])
 def analyze_video():
@@ -84,12 +119,14 @@ def analyze_video():
 
     file.save(input_path)
 
-    global processing_status
-    processing_status = {
-        "progress": 0,
-        "status": "processing",
-        "metrics_ready": False
-    }
+    update_processing_status(
+        progress=0,
+        status="processing",
+        metrics_ready=False,
+        message="Queued",
+        output_video=f"/output/{output_name}",
+        analytics_file=""
+    )
 
     worker = threading.Thread(
         target=run_pipeline_job,
@@ -100,20 +137,36 @@ def analyze_video():
 
     return jsonify({
         "status": "started",
-        "message": "Processing initialized. Monitor stream via /progress-stream",
+        "message": "Processing initialized. Monitor progress via /progress-stream or /status",
         "output_video": f"/output/{output_name}"
     }), 202
+
+
+@app.route("/status", methods=["GET"])
+def status():
+    with status_lock:
+        return jsonify(processing_status), 200
+
 
 @app.route("/progress-stream", methods=["GET"])
 def progress_stream():
     def generate_progress_events():
+        last_payload = None
         while True:
-            yield f"data: {json.dumps(processing_status)}\n\n"
-            if processing_status["status"] in ["completed", "failed"]:
+            with status_lock:
+                payload = dict(processing_status)
+
+            if payload != last_payload:
+                yield f"data: {json.dumps(payload)}\n\n"
+                last_payload = payload
+
+            if payload["status"] in ["completed", "failed"]:
                 break
+
             time.sleep(0.5)
 
     return Response(generate_progress_events(), mimetype="text/event-stream")
+
 
 @app.route("/analytics-data", methods=["GET"])
 def get_analytics_data():
@@ -129,9 +182,11 @@ def get_analytics_data():
     except Exception as e:
         return jsonify({"error": "Failed to read analytics file", "details": str(e)}), 500
 
+
 @app.route("/output/<filename>", methods=["GET"])
 def serve_output(filename):
     return send_from_directory(app.config["OUTPUT_FOLDER"], filename)
+
 
 if __name__ == "__main__":
     os.makedirs(INPUT_FOLDER, exist_ok=True)
