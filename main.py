@@ -5,6 +5,7 @@ import gc
 import os
 import json
 import time
+import traceback
 import csv
 import argparse
 from pathlib import Path
@@ -838,13 +839,7 @@ def process_chunk(
     return output_video_frames, last_team_control, team_colors_ready
 
 
-def main():
-    def write_progress(
-    progress_file,
-    progress,
-    status="processing",
-    message=""
-):
+def write_progress(progress_file, progress, status="processing", message=""):
     data = {
         "progress": round(float(progress), 2),
         "status": status,
@@ -855,49 +850,28 @@ def main():
     with open(progress_file, "w") as f:
         json.dump(data, f)
 
-    
-    parser = argparse.ArgumentParser(description="Football CV pipeline")
-    parser.add_argument(
-        "--input_video",
-        type=str,
-        default="input_videos/match2.mp4",
-        help="Path to the input video"
-    )
-    parser.add_argument(
-        "--output_video",
-        type=str,
-        default="output_videos/2.mp4",
-        help="Path to the output video"
-    )
-    parser.add_argument(
-        "--chunk_size",
-        type=int,
-        default=75,
-        help="Number of frames per chunk"
-    )
 
-    args = parser.parse_args()
-
-    INPUT_VIDEO_PATH = args.input_video
-    OUTPUT_VIDEO_PATH = args.output_video
-    CHUNK_SIZE = args.chunk_size
-    OUTPUT_DIR = str(Path(OUTPUT_VIDEO_PATH).parent)
-    progress_file = os.path.join(
-    OUTPUT_DIR,
-    "progress.json"
-        )
+def process_video(input_video_path, output_video_path, progress_callback=None, chunk_size=75):
+    OUTPUT_DIR = str(Path(output_video_path).parent)
+    progress_file = os.path.join(OUTPUT_DIR, "progress.json")
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    cap = cv2.VideoCapture(INPUT_VIDEO_PATH)
+    cap = cv2.VideoCapture(input_video_path)
 
     if not cap.isOpened():
         print("Could not open video.")
-        print(f"Check this path: {INPUT_VIDEO_PATH}")
-        return
+        print(f"Check this path: {input_video_path}")
+        return {"status": "error", "message": "Could not open video"}
 
     total_video_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
+    if total_video_frames == 0:
+        cap.release()
+        return {
+            "status": "error",
+            "message": "Video has zero frames"
+        }
+        
     fps = cap.get(cv2.CAP_PROP_FPS)
     if fps == 0:
         fps = 24
@@ -911,7 +885,7 @@ def main():
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
     out = cv2.VideoWriter(
-        OUTPUT_VIDEO_PATH,
+        output_video_path,
         fourcc,
         fps,
         (width, height)
@@ -919,9 +893,9 @@ def main():
 
     if not out.isOpened():
         print("Could not create output video.")
-        print(f"Check this path: {OUTPUT_VIDEO_PATH}")
+        print(f"Check this path: {output_video_path}")
         cap.release()
-        return
+        return {"status": "error", "message": "Could not create output video"}
 
     tracker = Tracker(
         model_path="models/yolov8s_players_refs_best.pt",
@@ -931,7 +905,6 @@ def main():
 
     team_assigner = TeamAssigner()
     player_assigner = PlayerBallAssigner()
-
     analytics = MatchAnalytics(output_dir=OUTPUT_DIR)
 
     id_stabilizer = PlayerIDStabilizer(
@@ -961,7 +934,6 @@ def main():
     )
 
     game_state_history = []
-
     team_colors_ready = False
     last_team_control = 0
     ball_control_history = []
@@ -976,32 +948,68 @@ def main():
         unit="frame"
     )
 
-    write_progress(
-        progress_file,
-        progress=0,
-        status="processing",
-        message="Starting video processing"
-    )
+    write_progress(progress_file, 0, "processing", "Starting video processing")
+    if progress_callback:
+        progress_callback(0)
 
-    while True:
-        ret, frame = cap.read()
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
 
-        if not ret:
-            break
+            frame = cv2.resize(frame, (TARGET_WIDTH, TARGET_HEIGHT))
+            chunk_frames.append(frame)
+            progress_bar.update(1)
 
-        # Resize every frame to fixed resolution
-        frame = cv2.resize(
-            frame,
-            (TARGET_WIDTH, TARGET_HEIGHT)
-        )
-        chunk_frames.append(frame)
-        progress_bar.update(1)
+            if len(chunk_frames) == chunk_size:
+                print(
+                    f"\nProcessing chunk {chunk_number} | "
+                    f"frames {frame_offset + 1} to {frame_offset + len(chunk_frames)}"
+                )
 
+                output_frames, last_team_control, team_colors_ready = process_chunk(
+                    video_frames=chunk_frames,
+                    tracker=tracker,
+                    team_assigner=team_assigner,
+                    player_assigner=player_assigner,
+                    ball_control_history=ball_control_history,
+                    last_team_control=last_team_control,
+                    team_colors_ready=team_colors_ready,
+                    frame_offset=frame_offset,
+                    analytics=analytics,
+                    frame_width=width,
+                    frame_height=height,
+                    id_stabilizer=id_stabilizer,
+                    possession_state=possession_state,
+                    game_state_analyzer=game_state_analyzer,
+                    game_state_history=game_state_history
+                )
 
-        
-        if len(chunk_frames) == CHUNK_SIZE:
+                for output_frame in output_frames:
+                    out.write(output_frame)
+
+                frame_offset += len(chunk_frames)
+
+                progress_percent = (frame_offset / total_video_frames) * 100
+                write_progress(
+                    progress_file,
+                    progress=progress_percent,
+                    status="processing",
+                    message=f"Processed {frame_offset}/{total_video_frames} frames"
+                )
+                if progress_callback:
+                    progress_callback(int(progress_percent))
+
+                chunk_frames.clear()
+                del output_frames
+                gc.collect()
+
+                chunk_number += 1
+
+        if len(chunk_frames) > 0:
             print(
-                f"\nProcessing chunk {chunk_number} | "
+                f"\nProcessing final chunk {chunk_number} | "
                 f"frames {frame_offset + 1} to {frame_offset + len(chunk_frames)}"
             )
 
@@ -1027,79 +1035,94 @@ def main():
                 out.write(output_frame)
 
             frame_offset += len(chunk_frames)
-            progress_percent = (
-                frame_offset / total_video_frames
-            ) * 100
-
-            write_progress(
-                progress_file,
-                progress=progress_percent,
-                status="processing",
-                message=f"Processed {frame_offset}/{total_video_frames} frames"
-            )
-
             chunk_frames.clear()
             del output_frames
             gc.collect()
 
-            chunk_number += 1
+        analytics.save_all(ball_control_history)
+        analytics_json_path = os.path.join(OUTPUT_DIR, "analytics_data.json")
 
-    if len(chunk_frames) > 0:
-        print(
-            f"\nProcessing final chunk {chunk_number} | "
-            f"frames {frame_offset + 1} to {frame_offset + len(chunk_frames)}"
+        analytics_data = {
+            "possession": getattr(analytics, "possession_stats", {}),
+            "passes": getattr(analytics, "pass_stats", {}),
+            "team_stats": getattr(analytics, "team_stats", {}),
+            "player_stats": getattr(analytics, "player_stats", {})
+        }
+
+        with open(analytics_json_path, "w") as f:
+            json.dump(analytics_data, f, indent=4)
+
+        write_progress(
+            progress_file,
+            progress=100,
+            status="completed",
+            message="Video processing completed"
+        )
+        if progress_callback:
+            progress_callback(100)
+
+        save_game_state_csv(
+            game_state_history=game_state_history,
+            output_dir=OUTPUT_DIR
         )
 
-        output_frames, last_team_control, team_colors_ready = process_chunk(
-            video_frames=chunk_frames,
-            tracker=tracker,
-            team_assigner=team_assigner,
-            player_assigner=player_assigner,
-            ball_control_history=ball_control_history,
-            last_team_control=last_team_control,
-            team_colors_ready=team_colors_ready,
-            frame_offset=frame_offset,
-            analytics=analytics,
-            frame_width=width,
-            frame_height=height,
-            id_stabilizer=id_stabilizer,
-            possession_state=possession_state,
-            game_state_analyzer=game_state_analyzer,
-            game_state_history=game_state_history
-        )
+        print(f"Done. Output video saved to: {output_video_path}")
+        print(f"CSV, heatmap, and debug files saved in: {OUTPUT_DIR}")
 
-        for output_frame in output_frames:
-            out.write(output_frame)
+        return {
+            "status": "completed",
+            "output_video": output_video_path,
+            "analytics_file": analytics_json_path
+        }
 
-        frame_offset += len(chunk_frames)
+    except Exception as error:
+        traceback.print_exc()
+        write_progress(progress_file, 0, "error", str(error))
+        return {
+            "status": "error",
+            "message": str(error)
+        }
 
-        chunk_frames.clear()
-        del output_frames
-        gc.collect()
+    finally:
+        progress_bar.close()
+        try:
+            cap.release()
+        except:
+            pass
+        try:
+            out.release()
+        except:
+            pass
 
-    progress_bar.close()
 
-    cap.release()
-    out.release()
-
-    analytics.save_all(ball_control_history)
-    write_progress(
-        progress_file,
-        progress=100,
-        status="completed",
-        message="Video processing completed"
+def main():
+    parser = argparse.ArgumentParser(description="Football CV pipeline")
+    parser.add_argument(
+        "--input_video",
+        type=str,
+        default="input_videos/match2.mp4",
+        help="Path to the input video"
+    )
+    parser.add_argument(
+        "--output_video",
+        type=str,
+        default="output_videos/2.mp4",
+        help="Path to the output video"
+    )
+    parser.add_argument(
+        "--chunk_size",
+        type=int,
+        default=75,
+        help="Number of frames per chunk"
     )
 
+    args = parser.parse_args()
 
-    
-    save_game_state_csv(
-        game_state_history=game_state_history,
-        output_dir=OUTPUT_DIR
+    process_video(
+        input_video_path=args.input_video,
+        output_video_path=args.output_video,
+        chunk_size=args.chunk_size
     )
-
-    print(f"Done. Output video saved to: {OUTPUT_VIDEO_PATH}")
-    print(f"CSV, heatmap, and debug files saved in: {OUTPUT_DIR}")
-
 
 if __name__ == "__main__":
     main()
