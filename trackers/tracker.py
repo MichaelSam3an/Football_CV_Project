@@ -473,7 +473,7 @@ class Tracker:
         candidate_distance /= frame_diag
 
         # Same candidate continuing
-    if candidate_distance < 0.03:
+      if candidate_distance < 0.03:
 
         self.ball_candidate_frames += 1
 
@@ -483,15 +483,15 @@ class Tracker:
             self.ball_candidate_frames = 1
 
         # Confirm switch
-        if self.ball_candidate_frames >= self.ball_switch_confirm_frames:
+     if self.ball_candidate_frames >= self.ball_switch_confirm_frames:
 
-            self.previous_ball_bbox = self.ball_candidate_bbox
-            self.ball_missing_frames = 0
-            self.ball_candidate_bbox = None
-            self.ball_candidate_frames = 0
-            self.ball_search_padding = 180
+        self.previous_ball_bbox = self.ball_candidate_bbox
+        self.ball_missing_frames = 0
+        self.ball_candidate_bbox = None
+        self.ball_candidate_frames = 0
+        self.ball_search_padding = 180
 
-            return self.previous_ball_bbox
+        return self.previous_ball_bbox
 
         # Keep previous until switch confirmed
         return self.previous_ball_bbox
