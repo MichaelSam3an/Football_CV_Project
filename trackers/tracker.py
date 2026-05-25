@@ -54,9 +54,9 @@ class Tracker:
         self.main_conf = 0.15
         self.main_imgsz = 960
 
-        self.ball_conf = 0.12
+        self.ball_conf = 0.16
         self.ball_imgsz = 1280
-        self.max_ball_missing_frames = 35
+        self.max_ball_missing_frames = 25
         
         # Ball filtering settings
         self.max_ball_interpolation_gap = 8
@@ -65,7 +65,7 @@ class Tracker:
         
         self.ball_search_padding = 180
         self.ball_search_padding_step = 80
-        self.ball_max_search_padding = 420
+        self.ball_max_search_padding = 240
 
         # Ball tracking memory
         self.previous_ball_bbox = None
@@ -390,12 +390,12 @@ class Tracker:
                 best_score = candidate_score
                 best_bbox = bbox
 
-        MIN_ACCEPTABLE_SCORE = 0.45
+        MIN_ACCEPTABLE_SCORE = 0.55
 
         if previous_ball_bbox is not None:
             previous_height = previous_ball_bbox[3] - previous_ball_bbox[1]
             if previous_height < 18:
-                MIN_ACCEPTABLE_SCORE = 0.28
+                MIN_ACCEPTABLE_SCORE = 0.35
 
         if best_bbox is None or best_score < MIN_ACCEPTABLE_SCORE:
             self.ball_missing_frames += 1
