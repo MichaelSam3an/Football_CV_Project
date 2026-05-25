@@ -8,8 +8,6 @@ import cv2
 import sys
 from pathlib import Path
 import torch
-from sahi.predict import get_sliced_prediction
-from sahi import AutoDetectionModel
 
 
 sys.path.append("../")
@@ -90,7 +88,29 @@ class Tracker:
         self.play_area_right_ratio = 0.99
         self.play_area_top_ratio = 0.03
         self.play_area_bottom_ratio = 0.98
-        
+
+
+
+        self.ball_kalman = cv2.KalmanFilter(4, 2)
+        self.ball_kalman.transitionMatrix = np.array(
+            [[1, 0, 1, 0],
+             [0, 1, 0, 1],
+             [0, 0, 1, 0],
+             [0, 0, 0, 1]], dtype=np.float32
+        )
+        self.ball_kalman.measurementMatrix = np.array(
+            [[1, 0, 0, 0],
+             [0, 1, 0, 0]], dtype=np.float32
+        )
+        self.ball_kalman.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03
+        self.ball_kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.5
+        self.ball_kalman.errorCovPost = np.eye(4, dtype=np.float32)
+        self.ball_kalman.statePost = np.zeros((4, 1), dtype=np.float32)
+
+        self.ball_kalman_initialized = False
+        self.ball_kalman_last_size = None
+        self.ball_kalman_missed = 0
+        self.max_ball_kalman_missed = 6
 
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
@@ -383,42 +403,68 @@ class Tracker:
         return score
 
 
-    def get_ball_bbox_from_ball_model(self, detection, frame):
-        if detection is None:
+
+    def init_ball_kalman(self, bbox):
+        cx, cy = get_center_of_bbox(bbox)
+        self.ball_kalman.statePost = np.array(
+            [[np.float32(cx)], [np.float32(cy)], [0.0], [0.0]],
+            dtype=np.float32
+        )
+        self.ball_kalman_initialized = True
+        w = max(6, int(bbox[2] - bbox[0]))
+        h = max(6, int(bbox[3] - bbox[1]))
+        self.ball_kalman_last_size = (w, h)
+        self.ball_kalman_missed = 0
+
+    def predict_ball_kalman_bbox(self):
+        if (not self.ball_kalman_initialized or self.ball_kalman_last_size is None):
             return None
 
-        candidates = []
+        pred = self.ball_kalman.predict()
+        cx = float(pred[0, 0])
+        cy = float(pred[1, 0])
+        w, h = self.ball_kalman_last_size
 
-        # YOLO candidates
-        if detection.boxes is not None:
-            for box in detection.boxes:
-                score = float(box.conf[0])
-                bbox = box.xyxy[0].tolist()
-                candidates.append((bbox, score))
+        return [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
 
-        # SAHI candidates
-        candidates.extend(self.get_ball_candidates_from_sahi(frame))
+    def correct_ball_kalman(self, bbox):
+        if bbox is None:
+            return
 
-        # No candidates at all
-        if len(candidates) == 0:
-            self.ball_missing_frames += 1
+        cx, cy = get_center_of_bbox(bbox)
+        measurement = np.array(
+            [[np.float32(cx)], [np.float32(cy)]],
+            dtype=np.float32
+        )
 
-            if (
-                self.previous_ball_bbox is not None and
-                self.ball_missing_frames <= self.max_ball_missing_frames
-            ):
-                return self.previous_ball_bbox
+        if not self.ball_kalman_initialized:
+            self.init_ball_kalman(bbox)
+            return
 
+        self.ball_kalman.correct(measurement)
+        self.ball_kalman_last_size = (
+            max(6, int(bbox[2] - bbox[0])),
+            max(6, int(bbox[3] - bbox[1]))
+        )
+        self.ball_kalman_missed = 0
+    
+
+    def get_ball_bbox_from_ball_model(self, detection, frame):
+        if detection is None or detection.boxes is None:
             return None
 
         best_bbox = None
         best_score = -999999
+
         previous_ball_bbox = self.previous_ball_bbox
 
-        for bbox, base_score, *rest in candidates:
+        for box in detection.boxes:
+            score = float(box.conf[0])
+            bbox = box.xyxy[0].tolist()
+
             candidate_score = self.score_ball_candidate(
                 bbox=bbox,
-                base_score=base_score,
+                base_score=score,
                 frame_shape=frame.shape,
                 previous_ball_bbox=previous_ball_bbox
             )
@@ -437,20 +483,25 @@ class Tracker:
             if previous_height < 18:
                 MIN_ACCEPTABLE_SCORE = 0.28
 
-        if best_bbox is None or best_score < MIN_ACCEPTABLE_SCORE:
-            self.ball_missing_frames += 1
-    
-            if (
-                self.previous_ball_bbox is not None and
-                self.ball_missing_frames <= self.max_ball_missing_frames
-            ):
-                return self.previous_ball_bbox
+        if best_bbox is not None and best_score >= MIN_ACCEPTABLE_SCORE:
+            self.correct_ball_kalman(best_bbox)
+            self.previous_ball_bbox = best_bbox
+            self.ball_missing_frames = 0
+            self.ball_kalman_missed = 0
+            return best_bbox
 
-            return None
+        self.ball_missing_frames += 1
+        self.ball_kalman_missed += 1
 
-        self.previous_ball_bbox = best_bbox
-        self.ball_missing_frames = 0
-        return best_bbox
+        if self.ball_kalman_initialized and self.ball_kalman_missed <= self.max_ball_kalman_missed:
+            pred_bbox = self.predict_ball_kalman_bbox()
+            if pred_bbox is not None:
+                return pred_bbox
+
+        if self.previous_ball_bbox is not None and self.ball_missing_frames <= self.max_ball_missing_frames:
+            return self.previous_ball_bbox
+
+        return None
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
@@ -539,9 +590,7 @@ class Tracker:
         new_ball_model_used = 0
         normal_ball_used = 0
         missed_ball = 0
-        rejected_by_motion = 0
-        rejected_by_filter = 0
-
+        
         for frame_num, detection in enumerate(detections):
             cls_names = detection.names
             cls_names_inv = {v: k for k, v in cls_names.items()}
