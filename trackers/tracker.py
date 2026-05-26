@@ -86,6 +86,9 @@ class Tracker:
 
         self.ball_smooth_window = 3
         self.ball_position_history = []
+
+        self.outside_pitch_grace_frames = 3
+        self.outside_pitch_counter = 0
     
     def apply_soft_edge_penalty(self, bbox, frame_shape, score):
         frame_height, frame_width = frame_shape[:2]
@@ -459,6 +462,10 @@ class Tracker:
             ):
                 return self.previous_ball_bbox
 
+            return None
+
+
+        if not self.is_inside_play_area(best_bbox, frame.shape) and best_score < 0.7:
             return None
 
         # If the new detection is very close to the previous ball, accept immediately
