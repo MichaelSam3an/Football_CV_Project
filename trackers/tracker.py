@@ -80,6 +80,47 @@ class Tracker:
         self.ball_candidate_frames = 0
         self.ball_switch_confirm_frames = 2
 
+        self.edge_penalty_ratio = 0.06
+        self.edge_penalty_value = 0.18
+
+
+        self.ball_smooth_window = 3
+        self.ball_position_history = []
+    
+    def apply_soft_edge_penalty(self, bbox, frame_shape, score):
+        frame_height, frame_width = frame_shape[:2]
+        x, y = get_center_of_bbox(bbox)
+
+        margin_x = frame_width * self.edge_penalty_ratio
+        margin_y = frame_height * self.edge_penalty_ratio
+
+        if (
+            x < margin_x or
+            x > frame_width - margin_x or
+            y < margin_y or
+            y > frame_height - margin_y
+        ):
+            score -= self.edge_penalty_value
+
+        return score
+
+    def smooth_ball_bbox(self, bbox):
+        if bbox is None:
+            return None
+
+        self.ball_position_history.append(bbox)
+
+        if len(self.ball_position_history) > self.ball_smooth_window:
+            self.ball_position_history.pop(0)
+
+        if len(self.ball_position_history) == 1:
+            return bbox
+
+        arr = np.array(self.ball_position_history, dtype=np.float32)
+        smoothed = np.mean(arr, axis=0)
+
+        return smoothed.tolist()
+    
     def add_position_to_tracks(self, tracks):
         for object_name, object_tracks in tracks.items():
             if object_name not in ["players", "referees", "ball"]:
@@ -337,7 +378,7 @@ class Tracker:
                 score += 0.12
             else:
                 score -= normalized_distance * (0.5 if is_aerial_ball else 1.0)
-
+        score = self.apply_soft_edge_penalty(bbox, frame_shape, score)
         return score
 
     def get_ball_bbox_from_ball_model(self, detection, frame):
@@ -357,10 +398,12 @@ class Tracker:
         if self.previous_ball_bbox is not None:
             candidates.extend(self.get_ball_candidates_from_local_crop(frame))
 
+        # No candidates at all
         if len(candidates) == 0:
             self.ball_missing_frames += 1
-            self.ball_lock_frames = 0
-            
+            self.ball_candidate_bbox = None
+            self.ball_candidate_frames = 0
+
             self.ball_search_padding = min(
                 self.ball_search_padding + self.ball_search_padding_step,
                 self.ball_max_search_padding
@@ -372,8 +415,6 @@ class Tracker:
             ):
                 return self.previous_ball_bbox
 
-            
-            
             return None
 
         best_bbox = None
@@ -404,7 +445,8 @@ class Tracker:
 
         if best_bbox is None or best_score < MIN_ACCEPTABLE_SCORE:
             self.ball_missing_frames += 1
-            self.ball_lock_frames = 0
+            self.ball_candidate_bbox = None
+            self.ball_candidate_frames = 0
 
             self.ball_search_padding = min(
                 self.ball_search_padding + self.ball_search_padding_step,
@@ -419,94 +461,67 @@ class Tracker:
 
             return None
 
-
-
-        # Same area as previous ball -> trust immediately
-
+        # If the new detection is very close to the previous ball, accept immediately
         if previous_ball_bbox is not None:
-
             previous_center = get_center_of_bbox(previous_ball_bbox)
             current_center = get_center_of_bbox(best_bbox)
 
             distance = np.linalg.norm(
-                np.array(current_center) -
-                np.array(previous_center)
+                np.array(current_center) - np.array(previous_center)
             )
 
-            frame_diag = (
-                frame.shape[0] ** 2 +
-                frame.shape[1] ** 2
-            ) ** 0.5
-
+            frame_diag = (frame.shape[0] ** 2 + frame.shape[1] ** 2) ** 0.5
             normalized_distance = distance / frame_diag
 
-            # Small movement -> stable tracking
             if normalized_distance < 0.04:
+                smoothed_bbox = self.smooth_ball_bbox(best_bbox)
 
-                self.previous_ball_bbox = best_bbox
+                self.previous_ball_bbox = smoothed_bbox
                 self.ball_missing_frames = 0
                 self.ball_candidate_bbox = None
                 self.ball_candidate_frames = 0
                 self.ball_search_padding = 180
+                self.ball_position_history = [smoothed_bbox]
 
-                return best_bbox
+                return smoothed_bbox
 
         # Possible switch candidate
         if self.ball_candidate_bbox is None:
-
             self.ball_candidate_bbox = best_bbox
             self.ball_candidate_frames = 1
-
             return self.previous_ball_bbox
 
         candidate_center = get_center_of_bbox(self.ball_candidate_bbox)
         current_center = get_center_of_bbox(best_bbox)
 
         candidate_distance = np.linalg.norm(
-            np.array(candidate_center) -
-            np.array(current_center)
+            np.array(candidate_center) - np.array(current_center)
         )
 
-        frame_diag = (
-            frame.shape[0] ** 2 +
-            frame.shape[1] ** 2
-        ) ** 0.5
-
+        frame_diag = (frame.shape[0] ** 2 + frame.shape[1] ** 2) ** 0.5
         candidate_distance /= frame_diag
 
-        # Same candidate continuing
         if candidate_distance < 0.03:
-
             self.ball_candidate_frames += 1
-
         else:
-
             self.ball_candidate_bbox = best_bbox
             self.ball_candidate_frames = 1
 
         # Confirm switch
         if self.ball_candidate_frames >= self.ball_switch_confirm_frames:
+            confirmed_bbox = self.smooth_ball_bbox(self.ball_candidate_bbox)
 
-            self.previous_ball_bbox = self.ball_candidate_bbox
+            self.previous_ball_bbox = confirmed_bbox
             self.ball_missing_frames = 0
             self.ball_candidate_bbox = None
             self.ball_candidate_frames = 0
             self.ball_search_padding = 180
+            self.ball_position_history = [confirmed_bbox]
 
-            return self.previous_ball_bbox
+            return confirmed_bbox
 
-         # Keep previous until switch confirmed
+        # Keep previous until switch is confirmed
         return self.previous_ball_bbox
-        
-        
-         # Update lock state
-        
-        self.previous_ball_bbox = best_bbox
-        self.ball_missing_frames = 0
-        self.ball_lock_frames += 1
-        self.ball_search_padding = 180
-
-        return best_bbox
 
     
     def get_ball_bbox_from_normal_detection(self, detection, frame):
