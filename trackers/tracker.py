@@ -307,8 +307,6 @@ class Tracker:
         if aspect_ratio > 1.8 or aspect_ratio < 0.6:
             return None
         
-        if self.bbox_iou(candidate_bbox, any_player_bbox) > 0.15:
-            reject
         
         score = float(base_score)
 
