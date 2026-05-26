@@ -304,9 +304,12 @@ class Tracker:
             return None
 
         aspect_ratio = bbox_width / max(bbox_height, 1)
-        if aspect_ratio > 2.5 or aspect_ratio < 0.4:
+        if aspect_ratio > 1.8 or aspect_ratio < 0.6:
             return None
-
+        
+        if self.bbox_iou(candidate_bbox, any_player_bbox) > 0.15:
+            reject
+        
         score = float(base_score)
 
         if 20 < bbox_area < 1200:
