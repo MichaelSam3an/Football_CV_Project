@@ -22,6 +22,16 @@ from view_transformer import ViewTransformer
 from analytics import MatchAnalytics
 
 
+
+
+def enhance_frame(frame):
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    l2 = clahe.apply(l)
+    lab = cv2.merge((l2, a, b))
+    return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
 class PlayerIDStabilizer:
     """
     Stabilizes player/referee IDs across chunks.
@@ -57,6 +67,7 @@ class PlayerIDStabilizer:
             "referees": {}
         }
 
+    
     def get_bbox_center(self, bbox):
         x1, y1, x2, y2 = bbox
         return np.array([
@@ -959,6 +970,7 @@ def process_video(input_video_path, output_video_path, progress_callback=None, c
                 break
 
             frame = cv2.resize(frame, (TARGET_WIDTH, TARGET_HEIGHT))
+            frame = enhance_frame(frame)
             chunk_frames.append(frame)
             progress_bar.update(1)
 
