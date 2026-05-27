@@ -208,6 +208,55 @@ class Tracker:
         return ball_detections
 
     
+    def draw_game_state_badge(self, frame, state_info):
+        overlay = frame.copy()
+
+        state = state_info.get("state", "LIVE_PLAY")
+        reason = state_info.get("reason", "normal")
+
+        if state == "LIVE_PLAY":
+            color = (40, 180, 40)
+        elif state == "UNCERTAIN":
+            color = (0, 165, 255)
+        else:
+            color = (40, 40, 220)
+
+        h, w = frame.shape[:2]
+
+        x1 = int(w * 0.03)
+        y1 = int(h * 0.03)
+        x2 = int(w * 0.22)
+        y2 = int(h * 0.10)
+
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
+        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+
+        font_scale = 0.6 * self.get_ui_scale(frame)
+
+        cv2.putText(
+            frame,
+            f"STATE: {state}",
+            (x1 + 10, y1 + 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+
+        cv2.putText(
+            frame,
+            f"{reason}",
+            (x1 + 10, y1 + 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale * 0.8,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA
+        )
+
+        return frame
+
     
     def bbox_iou(self, box_a, box_b):
         ax1, ay1, ax2, ay2 = box_a
@@ -440,7 +489,8 @@ class Tracker:
                 best_bbox = bbox
 
         MIN_ACCEPTABLE_SCORE = 0.55
-
+        if previous_ball_bbox is not None and not self.is_inside_play_area(previous_ball_bbox, frame.shape):
+            MIN_ACCEPTABLE_SCORE = max(MIN_ACCEPTABLE_SCORE, 0.75)
         if previous_ball_bbox is not None:
             previous_height = previous_ball_bbox[3] - previous_ball_bbox[1]
             if previous_height < 18:
@@ -971,7 +1021,9 @@ class Tracker:
                 global_frame_num,
                 team_ball_control
             )
-
+            if game_state_per_frame is not None and frame_num < len(game_state_per_frame):
+                frame = self.draw_game_state_badge(frame, game_state_per_frame[frame_num])
+            
             output_video_frames.append(frame)
 
         return output_video_frames
