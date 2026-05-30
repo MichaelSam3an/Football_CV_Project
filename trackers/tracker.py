@@ -863,6 +863,35 @@ class Tracker:
     def draw_traingle(self, frame, bbox, color):
         return self.draw_triangle(frame, bbox, color)
 
+
+
+    def draw_ball_trail(self, frame, trail_points, color=(0, 255, 0)):
+        if len(trail_points) < 2:
+            return frame
+
+        overlay = frame.copy()
+
+        for i in range(1, len(trail_points)):
+            pt1 = trail_points[i - 1]
+            pt2 = trail_points[i]
+
+            # Fade older segments
+            alpha = i / max(len(trail_points) - 1, 1)
+            thickness = max(1, int(4 * alpha))
+
+            cv2.line(
+                overlay,
+                pt1,
+                pt2,
+                color,
+                thickness,
+                cv2.LINE_AA
+            )
+
+        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+        return frame   
+    
+
     def draw_ball_marker(self, frame, bbox, color=(0, 255, 0)):
         cx, cy = get_center_of_bbox(bbox)
 
@@ -975,7 +1004,8 @@ class Tracker:
         game_state_per_frame=None
     ):
         output_video_frames = []
-
+        trail_points = []
+        
         for frame_num, frame in enumerate(video_frames):
             frame = frame.copy()
 
@@ -983,6 +1013,18 @@ class Tracker:
             ball_dict = tracks["ball"][frame_num]
             referee_dict = tracks["referees"][frame_num]
 
+            if len(ball_dict) > 0:
+                ball = next(iter(ball_dict.values()))
+                cx, cy = get_center_of_bbox(ball["bbox"])
+                trail_points.append((int(cx), int(cy)))
+
+                if len(trail_points) > 12:
+                    trail_points.pop(0)
+            else:
+                trail_points = []
+                
+            frame = self.draw_ball_trail(frame, trail_points, (0, 255, 0))
+            
             for track_id, player in player_dict.items():
                 color = player.get("team_color", (0, 0, 255))
 
