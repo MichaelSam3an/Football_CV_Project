@@ -223,9 +223,9 @@ class Tracker:
 
         h, w = frame.shape[:2]
 
-        x1 = int(w * 0.03)
+        x1 = int(w * 0.74)
         y1 = int(h * 0.03)
-        x2 = int(w * 0.22)
+        x2 = int(w * 0.97)
         y2 = int(h * 0.10)
 
         cv2.rectangle(overlay, (x1, y1), (x2, y2), color, -1)
@@ -1022,7 +1022,10 @@ class Tracker:
                     trail_points.pop(0)
             else:
                 trail_points = []
-                
+            if game_state_per_frame is not None and frame_num < len(game_state_per_frame):
+                if game_state_per_frame[frame_num]["state"] != "LIVE_PLAY":
+                    trail_points = []    
+                    
             frame = self.draw_ball_trail(frame, trail_points, (0, 255, 0))
             
             for track_id, player in player_dict.items():
