@@ -399,13 +399,26 @@ class Tracker:
         aspect_ratio = bbox_width / max(bbox_height, 1)
         if aspect_ratio > 1.8 or aspect_ratio < 0.6:
             return None
+        # Reject tiny, nearly-static white dots more aggressively
+        if bbox_area < 80 and previous_ball_bbox is not None:
+            previous_center = get_center_of_bbox(previous_ball_bbox)
+            current_center = get_center_of_bbox(bbox)
         
+            distance = np.linalg.norm(
+                np.array(current_center) - np.array(previous_center)
+            )
+        
+            frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
+            normalized_distance = distance / frame_diag
+        
+            if normalized_distance < 0.01:
+                return None
         
         score = float(base_score)
 
         if 20 < bbox_area < 1200:
             score += 0.20
-        elif bbox_area < 20:
+        elif bbox_area < 35:
             score -= 0.05
         else:
             score -= 0.15
@@ -1066,8 +1079,7 @@ class Tracker:
                 global_frame_num,
                 team_ball_control
             )
-            if game_state_per_frame is not None and frame_num < len(game_state_per_frame):
-                frame = self.draw_game_state_badge(frame, game_state_per_frame[frame_num])
+           
             
             output_video_frames.append(frame)
 
