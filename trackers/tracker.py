@@ -80,9 +80,6 @@ class Tracker:
         self.ball_candidate_frames = 0
         self.ball_switch_confirm_frames = 2
 
-        self.edge_penalty_ratio = 0.06
-        self.edge_penalty_value = 0.18
-
 
         self.ball_smooth_window = 3
         self.ball_position_history = []
@@ -90,23 +87,7 @@ class Tracker:
         self.outside_pitch_grace_frames = 3
         self.outside_pitch_counter = 0
     
-    def apply_soft_edge_penalty(self, bbox, frame_shape, score):
-        frame_height, frame_width = frame_shape[:2]
-        x, y = get_center_of_bbox(bbox)
-
-        margin_x = frame_width * self.edge_penalty_ratio
-        margin_y = frame_height * self.edge_penalty_ratio
-
-        if (
-            x < margin_x or
-            x > frame_width - margin_x or
-            y < margin_y or
-            y > frame_height - margin_y
-        ):
-            score -= self.edge_penalty_value
-
-        return score
-
+    
     def smooth_ball_bbox(self, bbox):
         if bbox is None:
             return None
@@ -376,7 +357,7 @@ class Tracker:
         return candidates
 
     
-    def score_ball_candidate(self, bbox, base_score, frame_shape, previous_ball_bbox=None):
+    def score_ball_candidate(self, bbox, base_score, frame_shape, frame, previous_ball_bbox=None):
         frame_height, frame_width = frame_shape[:2]
 
         x1, y1, x2, y2 = bbox
@@ -398,6 +379,9 @@ class Tracker:
 
         aspect_ratio = bbox_width / max(bbox_height, 1)
         if aspect_ratio > 1.8 or aspect_ratio < 0.6:
+            return None
+
+        if bbox_area < 120 and self.is_penalty_spot_like(frame, bbox):
             return None
         # Reject tiny, nearly-static white dots more aggressively
         if bbox_area < 80 and previous_ball_bbox is not None:
@@ -446,6 +430,27 @@ class Tracker:
         score = self.apply_soft_edge_penalty(bbox, frame_shape, score)
         return score
 
+    def is_penalty_spot_like(self, frame, bbox):
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        pad = 4
+    
+        x1 = max(0, x1 - pad)
+        y1 = max(0, y1 - pad)
+        x2 = min(frame.shape[1], x2 + pad)
+        y2 = min(frame.shape[0], y2 + pad)
+    
+        patch = frame[y1:y2, x1:x2]
+        if patch.size == 0:
+            return False
+    
+        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
+    
+        std = float(np.std(gray))
+        mean = float(np.mean(gray))
+        white_ratio = float(np.mean(gray > 200))
+    
+        return std < 18.0 and mean > 145.0 and white_ratio > 0.35
+    
     def get_ball_bbox_from_ball_model(self, detection, frame):
         if detection is None:
             return None
