@@ -418,7 +418,7 @@ class Tracker:
 
         if 20 < bbox_area < 1200:
             score += 0.20
-        elif bbox_area < 35:
+        elif bbox_area < 45:
             score -= 0.05
         else:
             score -= 0.15
