@@ -427,7 +427,6 @@ class Tracker:
                 score += 0.12
             else:
                 score -= normalized_distance * (0.5 if is_aerial_ball else 1.0)
-        score = self.apply_soft_edge_penalty(bbox, frame_shape, score)
         return score
 
     def is_penalty_spot_like(self, frame, bbox):
@@ -496,6 +495,7 @@ class Tracker:
                 bbox=bbox,
                 base_score=base_score,
                 frame_shape=frame.shape,
+                frame=frame,
                 previous_ball_bbox=previous_ball_bbox
             )
 
