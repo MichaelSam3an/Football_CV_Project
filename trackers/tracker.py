@@ -399,14 +399,18 @@ class Tracker:
                 return None
         
         score = float(base_score)
-
+        
         if 20 < bbox_area < 1200:
             score += 0.20
         elif bbox_area < 45:
             score -= 0.05
         else:
             score -= 0.15
-
+        if bbox_area < 160 and self.is_penalty_spot_like(frame, bbox):
+            return None
+        
+        if bbox_area < 60:
+            return None
         cx, cy = get_center_of_bbox(bbox)
 
         if previous_ball_bbox is not None:
@@ -431,7 +435,7 @@ class Tracker:
 
     def is_penalty_spot_like(self, frame, bbox):
         x1, y1, x2, y2 = [int(v) for v in bbox]
-        pad = 4
+        pad = 10
     
         x1 = max(0, x1 - pad)
         y1 = max(0, y1 - pad)
@@ -444,11 +448,23 @@ class Tracker:
     
         gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
     
-        std = float(np.std(gray))
-        mean = float(np.mean(gray))
-        white_ratio = float(np.mean(gray > 200))
+        # Texture / edge strength
+        blur = cv2.GaussianBlur(gray, (3, 3), 0)
+        lap_var = float(cv2.Laplacian(blur, cv2.CV_64F).var())
     
-        return std < 18.0 and mean > 145.0 and white_ratio > 0.35
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+        edge_strength = float(np.mean(np.sqrt(sobelx ** 2 + sobely ** 2)))
+    
+        white_ratio = float(np.mean(gray > 210))
+        mean_gray = float(np.mean(gray))
+    
+        return (
+            white_ratio > 0.25 and
+            mean_gray > 145.0 and
+            lap_var < 20.0 and
+            edge_strength < 14.0
+        )
     
     def get_ball_bbox_from_ball_model(self, detection, frame):
         if detection is None:
