@@ -431,7 +431,7 @@ class Tracker:
         if bbox_area < 160 and self.is_penalty_spot_like(frame, bbox):
             return None
         
-        if bbox_area < 60:
+        if bbox_area < 35:
             return None
         cx, cy = get_center_of_bbox(bbox)
 
@@ -586,6 +586,18 @@ class Tracker:
             frame_diag = (frame.shape[0] ** 2 + frame.shape[1] ** 2) ** 0.5
             normalized_distance = distance / frame_diag
 
+            if self.is_ball_too_static(
+                best_bbox,
+                previous_ball_bbox,
+                frame.shape
+            ):
+                self.static_ball_frames += 1
+            else:
+                self.static_ball_frames = 0
+            
+            if self.static_ball_frames >= 3:
+                return None
+            
             if normalized_distance < 0.04:
                 smoothed_bbox = self.smooth_ball_bbox(best_bbox)
 
