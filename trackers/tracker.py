@@ -67,6 +67,11 @@ class Tracker:
         self.ball_search_padding_step = 80
         self.ball_max_search_padding = 240
 
+
+        self.static_ball_frames = 0
+        self.max_static_ball_frames = 3
+        self.static_ball_motion_ratio = 0.004
+
         # Ball tracking memory
         self.previous_ball_bbox = None
         self.ball_missing_frames = 0        
@@ -168,7 +173,24 @@ class Tracker:
             detections += detections_batch
 
         return detections
+
+    def is_ball_too_static(self, bbox, previous_bbox, frame_shape):
+        if previous_bbox is None:
+            return False
     
+        frame_height, frame_width = frame_shape[:2]
+        frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
+    
+        current_center = get_center_of_bbox(bbox)
+        previous_center = get_center_of_bbox(previous_bbox)
+    
+        distance = np.linalg.norm(
+            np.array(current_center) - np.array(previous_center)
+        )
+    
+        motion_ratio = distance / frame_diag
+        return motion_ratio < self.static_ball_motion_ratio
+        
     def detect_ball_frames(self, frames):
         if not self.use_new_ball_model or self.ball_model is None:
             return [None for _ in frames]
@@ -643,6 +665,14 @@ class Tracker:
                 best_score = score
                 best_bbox = bbox
 
+            if previous_ball_bbox is not None and self.is_ball_too_static(best_bbox, previous_ball_bbox, frame.shape):
+                self.static_ball_frames += 1
+            else:
+                self.static_ball_frames = 0
+            
+            if self.static_ball_frames >= self.max_static_ball_frames:
+                return None
+        
         return best_bbox
 
     def get_previous_ball_bbox(self, tracks, frame_num, lookback=8):
