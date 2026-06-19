@@ -67,18 +67,6 @@ class Tracker:
         self.ball_search_padding_step = 80
         self.ball_max_search_padding = 240
 
-
-        # In __init__ add these fields
-        self.static_marker_bbox = None
-        self.static_marker_frames = 0
-        self.static_marker_confirm_frames = 3
-        self.static_marker_center_px = 6
-        self.static_marker_center_ratio = 0.005
-
-        self.static_ball_frames = 0
-        self.max_static_ball_frames = 3
-        self.static_ball_motion_ratio = 0.004
-
         # Ball tracking memory
         self.previous_ball_bbox = None
         self.ball_missing_frames = 0        
@@ -92,63 +80,33 @@ class Tracker:
         self.ball_candidate_frames = 0
         self.ball_switch_confirm_frames = 2
 
+        self.edge_penalty_ratio = 0.06
+        self.edge_penalty_value = 0.18
+
 
         self.ball_smooth_window = 3
         self.ball_position_history = []
 
         self.outside_pitch_grace_frames = 3
         self.outside_pitch_counter = 0
+    
+    def apply_soft_edge_penalty(self, bbox, frame_shape, score):
+        frame_height, frame_width = frame_shape[:2]
+        x, y = get_center_of_bbox(bbox)
 
+        margin_x = frame_width * self.edge_penalty_ratio
+        margin_y = frame_height * self.edge_penalty_ratio
 
+        if (
+            x < margin_x or
+            x > frame_width - margin_x or
+            y < margin_y or
+            y > frame_height - margin_y
+        ):
+            score -= self.edge_penalty_value
 
+        return score
 
-
-
-
-    # Add these helper methods inside Tracker
-
-    def reset_static_marker_state(self):
-        self.static_marker_bbox = None
-        self.static_marker_frames = 0
-    
-    def is_static_white_marker(self, bbox, frame):
-        """
-        Returns True only if the candidate looks like a penalty spot / white marking
-        AND it keeps appearing at almost the same position for several frames.
-        """
-        if bbox is None:
-            self.reset_static_marker_state()
-            return False
-    
-        if not self.is_penalty_spot_like(frame, bbox):
-            self.reset_static_marker_state()
-            return False
-    
-        frame_h, frame_w = frame.shape[:2]
-        frame_diag = (frame_w ** 2 + frame_h ** 2) ** 0.5
-    
-        current_center = np.array(get_center_of_bbox(bbox), dtype=np.float32)
-    
-        if self.static_marker_bbox is None:
-            self.static_marker_bbox = bbox
-            self.static_marker_frames = 1
-            return False
-    
-        previous_center = np.array(
-            get_center_of_bbox(self.static_marker_bbox),
-            dtype=np.float32
-        )
-    
-        dist = np.linalg.norm(current_center - previous_center)
-    
-        if dist <= self.static_marker_center_px or (dist / frame_diag) <= self.static_marker_center_ratio:
-            self.static_marker_frames += 1
-        else:
-            self.static_marker_frames = 1
-    
-        self.static_marker_bbox = bbox
-        return self.static_marker_frames >= self.static_marker_confirm_frames
-    
     def smooth_ball_bbox(self, bbox):
         if bbox is None:
             return None
@@ -229,24 +187,7 @@ class Tracker:
             detections += detections_batch
 
         return detections
-
-    def is_ball_too_static(self, bbox, previous_bbox, frame_shape):
-        if previous_bbox is None:
-            return False
     
-        frame_height, frame_width = frame_shape[:2]
-        frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
-    
-        current_center = get_center_of_bbox(bbox)
-        previous_center = get_center_of_bbox(previous_bbox)
-    
-        distance = np.linalg.norm(
-            np.array(current_center) - np.array(previous_center)
-        )
-    
-        motion_ratio = distance / frame_diag
-        return motion_ratio < self.static_ball_motion_ratio
-        
     def detect_ball_frames(self, frames):
         if not self.use_new_ball_model or self.ball_model is None:
             return [None for _ in frames]
@@ -435,109 +376,63 @@ class Tracker:
         return candidates
 
     
-    # Replace score_ball_candidate with this version
-    def score_ball_candidate(self, bbox, base_score, frame_shape, frame, previous_ball_bbox=None):
+    def score_ball_candidate(self, bbox, base_score, frame_shape, previous_ball_bbox=None):
         frame_height, frame_width = frame_shape[:2]
-    
+
         x1, y1, x2, y2 = bbox
         bbox_width = x2 - x1
         bbox_height = y2 - y1
-    
+
         if bbox_width <= 1 or bbox_height <= 1:
             return None
-    
+
         if bbox_width > frame_width * self.max_ball_box_width_ratio:
             return None
-    
+
         if bbox_height > frame_height * self.max_ball_box_height_ratio:
             return None
-    
+
         bbox_area = bbox_width * bbox_height
         if bbox_area > 5000:
             return None
-    
+
         aspect_ratio = bbox_width / max(bbox_height, 1)
         if aspect_ratio > 1.8 or aspect_ratio < 0.6:
             return None
-    
-        if bbox_area < 35:
-            return None
-    
+        
+        
         score = float(base_score)
-    
-        # Penalize very white, low-texture blobs more strongly
-        if bbox_area < 160 and self.is_penalty_spot_like(frame, bbox):
-            score -= 0.30
-    
-        # Motion consistency: real ball should not look frozen for many frames
-        if previous_ball_bbox is not None:
-            prev_center = np.array(get_center_of_bbox(previous_ball_bbox), dtype=np.float32)
-            curr_center = np.array(get_center_of_bbox(bbox), dtype=np.float32)
-    
-            distance = np.linalg.norm(curr_center - prev_center)
-            frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
-            normalized_distance = distance / frame_diag
-    
-            # Hard reject: tiny static white thing is almost certainly a marking
-            if bbox_area < 220 and normalized_distance < 0.006:
-                return None
-    
-            previous_height = previous_ball_bbox[3] - previous_ball_bbox[1]
-            is_aerial_ball = previous_height < 18 and bbox_height < 18
-    
-            if normalized_distance < 0.01:
-                score -= 0.20
-            elif normalized_distance < 0.03:
-                score += 0.05
-            else:
-                score += 0.10 if is_aerial_ball else 0.00
-    
-            # Keep the original “ball tends to move” idea, but make it sharper
-            if normalized_distance > 0.04:
-                score -= normalized_distance * (0.5 if is_aerial_ball else 1.0)
-    
+
         if 20 < bbox_area < 1200:
-            score += 0.15
-        elif bbox_area < 45:
+            score += 0.20
+        elif bbox_area < 20:
             score -= 0.05
         else:
-            score -= 0.10
-    
+            score -= 0.15
+
+        cx, cy = get_center_of_bbox(bbox)
+
+        if previous_ball_bbox is not None:
+            previous_center = get_center_of_bbox(previous_ball_bbox)
+            current_center = np.array([cx, cy], dtype=np.float32)
+
+            distance = np.linalg.norm(
+                current_center - np.array(previous_center, dtype=np.float32)
+            )
+
+            frame_diag = (frame_width ** 2 + frame_height ** 2) ** 0.5
+            normalized_distance = distance / frame_diag
+
+            previous_height = previous_ball_bbox[3] - previous_ball_bbox[1]
+            is_aerial_ball = previous_height < 18 and bbox_height < 18
+
+            if normalized_distance < 0.03:
+                score += 0.12
+            else:
+                score -= normalized_distance * (0.5 if is_aerial_ball else 1.0)
+        score = self.apply_soft_edge_penalty(bbox, frame_shape, score)
         return score
 
-    # Replace is_penalty_spot_like with a stricter version
-    def is_penalty_spot_like(self, frame, bbox):
-        x1, y1, x2, y2 = [int(v) for v in bbox]
-        pad = 10
-    
-        x1 = max(0, x1 - pad)
-        y1 = max(0, y1 - pad)
-        x2 = min(frame.shape[1], x2 + pad)
-        y2 = min(frame.shape[0], y2 + pad)
-    
-        patch = frame[y1:y2, x1:x2]
-        if patch.size == 0:
-            return False
-    
-        gray = cv2.cvtColor(patch, cv2.COLOR_BGR2GRAY)
-    
-        blur = cv2.GaussianBlur(gray, (3, 3), 0)
-        lap_var = float(cv2.Laplacian(blur, cv2.CV_64F).var())
-    
-        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
-        sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
-        edge_strength = float(np.mean(np.sqrt(sobelx ** 2 + sobely ** 2)))
-    
-        white_ratio = float(np.mean(gray > 210))
-        mean_gray = float(np.mean(gray))
-    
-        return (
-            white_ratio > 0.33 and
-            mean_gray > 160.0 and
-            lap_var < 12.0 and
-            edge_strength < 10.0
-        )
-    
     def get_ball_bbox_from_ball_model(self, detection, frame):
         if detection is None:
             return None
@@ -579,23 +474,20 @@ class Tracker:
         previous_ball_bbox = self.previous_ball_bbox
 
         for bbox, base_score in candidates:
-            if self.is_static_white_marker(bbox, frame):
-                continue
-        
             candidate_score = self.score_ball_candidate(
                 bbox=bbox,
                 base_score=base_score,
                 frame_shape=frame.shape,
-                frame=frame,
                 previous_ball_bbox=previous_ball_bbox
             )
-        
+
             if candidate_score is None:
                 continue
-        
+
             if candidate_score > best_score:
                 best_score = candidate_score
                 best_bbox = bbox
+
         MIN_ACCEPTABLE_SCORE = 0.55
         if previous_ball_bbox is not None and not self.is_inside_play_area(previous_ball_bbox, frame.shape):
             MIN_ACCEPTABLE_SCORE = max(MIN_ACCEPTABLE_SCORE, 0.75)
@@ -638,18 +530,6 @@ class Tracker:
             frame_diag = (frame.shape[0] ** 2 + frame.shape[1] ** 2) ** 0.5
             normalized_distance = distance / frame_diag
 
-            if self.is_ball_too_static(
-                best_bbox,
-                previous_ball_bbox,
-                frame.shape
-            ):
-                self.static_ball_frames += 1
-            else:
-                self.static_ball_frames = 0
-            
-            if self.static_ball_frames >= 3:
-                return None
-            
             if normalized_distance < 0.04:
                 smoothed_bbox = self.smooth_ball_bbox(best_bbox)
 
@@ -659,7 +539,6 @@ class Tracker:
                 self.ball_candidate_frames = 0
                 self.ball_search_padding = 180
                 self.ball_position_history = [smoothed_bbox]
-                self.reset_static_marker_state()
 
                 return smoothed_bbox
 
@@ -695,7 +574,6 @@ class Tracker:
             self.ball_candidate_frames = 0
             self.ball_search_padding = 180
             self.ball_position_history = [confirmed_bbox]
-            self.reset_static_marker_state()
 
             return confirmed_bbox
 
@@ -706,43 +584,31 @@ class Tracker:
     def get_ball_bbox_from_normal_detection(self, detection, frame):
         if detection is None or detection.boxes is None:
             return None
-    
-        previous_ball_bbox = self.previous_ball_bbox
+
         names = detection.names
         best_bbox = None
         best_score = 0
-    
+
         for box in detection.boxes:
             cls_id = int(box.cls[0])
             score = float(box.conf[0])
-    
+
             class_name = str(names.get(cls_id, "")).lower().strip()
             if class_name != "ball":
                 continue
-    
+
             bbox = box.xyxy[0].tolist()
-    
+
             if not self.is_reasonable_ball_size(bbox, frame.shape):
                 continue
-    
+
             if not self.is_inside_play_area(bbox, frame.shape):
                 continue
-    
+
             if score > best_score:
                 best_score = score
                 best_bbox = bbox
-    
-            if previous_ball_bbox is not None and self.is_ball_too_static(best_bbox, previous_ball_bbox, frame.shape):
-                self.static_ball_frames += 1
-            else:
-                self.static_ball_frames = 0
-    
-            if self.static_ball_frames >= self.max_static_ball_frames:
-                return None
-    
-        if best_bbox is not None:
-            self.reset_static_marker_state()
-    
+
         return best_bbox
 
     def get_previous_ball_bbox(self, tracks, frame_num, lookback=8):
@@ -1200,7 +1066,8 @@ class Tracker:
                 global_frame_num,
                 team_ball_control
             )
-           
+            if game_state_per_frame is not None and frame_num < len(game_state_per_frame):
+                frame = self.draw_game_state_badge(frame, game_state_per_frame[frame_num])
             
             output_video_frames.append(frame)
 
